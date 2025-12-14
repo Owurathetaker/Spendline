@@ -348,7 +348,7 @@ def reset_current_month(user_id: str, month: str, keep_budget: bool):
     sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute()
     sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute()
 
-    patch = {"challenge_start": None, "challenge_length": None, "assets": 0}
+    patch = {"challenge_start": None, "challenge_length": None, "assets": 0, "liabilities": 0}
     if not keep_budget:
         patch["budget"] = 0
 
@@ -696,9 +696,23 @@ elif not st.session_state.onboarding_done:
 # Dashboard
 # =========================================================
 total_spent = sum_spent(expenses)
-assets_total = float(month_row.get("assets", 0.0))
+
+# ✅ assets should come from events (source of truth)
+if not asset_events_error:
+    assets_total = float(sum(float(a.get("amount", 0.0)) for a in asset_events))
+else:
+    assets_total = float(month_row.get("assets", 0.0))
+
 remaining = float(month_row.get("budget", 0.0)) - total_spent
 net_worth = assets_total - float(month_row.get("liabilities", 0.0))
+
+# ✅ keep months.assets synced (optional but prevents “stale” net worth)
+if (not asset_events_error) and abs(float(month_row.get("assets", 0.0)) - assets_total) > 0.0001:
+    try:
+        update_month(user_id, selected_month, {"assets": assets_total})
+        month_row["assets"] = assets_total
+    except Exception:
+        pass
 
 st.markdown("### 📈 Overview")
 c1, c2, c3, c4 = st.columns(4)
