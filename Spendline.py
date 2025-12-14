@@ -10,12 +10,14 @@ from supabase import create_client, Client
 
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
-# IMPORTANT FIX:
-#   Attach the logged-in user's JWT to PostgREST (sb.postgrest.auth(token))
-#   so RLS policies using auth.uid() pass.
+# Mobile-first fix:
+#   - Sidebar inputs are hard to discover on mobile.
+#   - Add "Quick Actions" on the main page (Budget / Expense / Assets)
+#     so the flow is obvious on phones.
+# Desktop still benefits from the sidebar.
 # =========================================================
 
-APP_NAME = "Spendline"
+APP_NAME = "Spendline v0.1"
 
 CATEGORIES = [
     "Food & Dining", "Transport", "Entertainment", "Shopping",
@@ -29,7 +31,7 @@ CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
 # ----------------------------
 # Page config
 # ----------------------------
-st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Spendline", layout="centered", initial_sidebar_state="expanded")
 
 
 # ----------------------------
@@ -71,7 +73,7 @@ def inject_theme(theme: str) -> None:
 {vars_css}
 
 .stApp {{ background: var(--bg) !important; }}
-.block-container {{ padding-top: 1rem; padding-bottom: 2rem; }}
+.block-container {{ padding-top: 0.9rem; padding-bottom: 2rem; max-width: 980px; }}
 
 h1,h2,h3,h4 {{ color: var(--text) !important; letter-spacing:-0.2px; }}
 p, label, .stMarkdown {{ color: var(--muted) !important; }}
@@ -120,6 +122,15 @@ div[data-testid="stButton"] button {{
 div[data-testid="stButton"] button:hover {{ background: var(--primaryHover) !important; }}
 div[data-testid="stButton"] button:active {{ transform: translateY(1px) !important; }}
 
+.small-hint {{
+  font-size: 0.92rem;
+  color: var(--muted);
+  background: rgba(100,116,139,0.08);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.6rem 0.75rem;
+}}
+
 @media (max-width: 480px) {{
   .block-container {{ padding-top: .7rem; }}
   h1 {{ font-size: 2.05rem !important; }}
@@ -150,14 +161,9 @@ sb = supabase_client()
 # Attach user JWT to PostgREST (CRITICAL for RLS)
 # ----------------------------
 def apply_db_auth(access_token: str | None) -> None:
-    """
-    Ensure database calls include Authorization: Bearer <token>,
-    so RLS policies using auth.uid() work.
-    """
     if not access_token:
         return
     try:
-        # postgrest client used by sb.table(...)
         sb.postgrest.auth(access_token)
     except Exception:
         pass
@@ -194,11 +200,13 @@ def clear_user():
             del st.session_state[k]
 
 
+# ----------------------------
+# DB operations
+# ----------------------------
 def ensure_month_row(user_id: str, month: str):
     res = sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute()
     if res.data:
         return res.data[0]
-
     insert = {
         "user_id": user_id,
         "month": month,
@@ -265,7 +273,8 @@ def sum_spent(expenses: list[dict]) -> float:
 def auth_screen():
     inject_theme("Light")
     st.title("💰 Spendline")
-    st.caption("Sign up to start tracking. No noise — just clarity.")
+    st.caption("A quiet budget tracker for people who want clarity, not motivation.")
+    st.caption("Built for personal use. Shared as-is. Your data stays private.")
 
     tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
 
@@ -296,7 +305,6 @@ def auth_screen():
                 st.error(f"Signup failed: {e}")
                 return
 
-            # Some projects require email confirmation → resp.user may be None
             user = getattr(resp, "user", None)
             session = getattr(resp, "session", None)
 
@@ -304,7 +312,7 @@ def auth_screen():
                 st.success("Check your email to confirm your account, then log in.")
                 return
 
-            # Save profile metadata
+            # Store profile + theme in metadata
             try:
                 sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
             except Exception:
@@ -363,6 +371,7 @@ user_id = user.id
 
 # Theme from metadata
 theme = "Light"
+md = {}
 try:
     md = getattr(user, "user_metadata", {}) or {}
     theme = md.get("theme", "Light") or "Light"
@@ -376,30 +385,23 @@ today = date.today()
 current_month = month_key(today)
 if "selected_month" not in st.session_state:
     st.session_state.selected_month = current_month
-
 selected_month = st.session_state.selected_month
 
-# Load month row + expenses (NOW AUTHED)
+# Load data
 month_row = ensure_month_row(user_id, selected_month)
 expenses = fetch_expenses(user_id, selected_month)
 currency = month_row.get("currency", "USD")
 
 
 # =========================================================
-# Sidebar: entry flow + logout
+# SIDEBAR (desktop-friendly)
 # =========================================================
 with st.sidebar:
-    name = ""
-    try:
-        md = getattr(user, "user_metadata", {}) or {}
-        name = md.get("name", "")
-    except Exception:
-        name = ""
-
+    name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
     st.caption(user.email)
 
-    if st.button("Log out", use_container_width=True):
+    if st.button("Log out", use_container_width=True, key="logout_sidebar"):
         try:
             sb.auth.sign_out()
         except Exception:
@@ -410,13 +412,13 @@ with st.sidebar:
     st.divider()
 
     st.caption("Month")
-    if st.button("◀ Prev", use_container_width=True):
+    colm1, colm2 = st.columns(2)
+    if colm1.button("◀ Prev", use_container_width=True, key="prev_month_sidebar"):
         y, mth = map(int, selected_month.split("-"))
         newd = date(y, mth, 1) - relativedelta(months=1)
         st.session_state.selected_month = month_key(newd)
         st.rerun()
-
-    if st.button("Next ▶", use_container_width=True):
+    if colm2.button("Next ▶", use_container_width=True, key="next_month_sidebar"):
         y, mth = map(int, selected_month.split("-"))
         newd = date(y, mth, 1) + relativedelta(months=1)
         st.session_state.selected_month = month_key(newd)
@@ -427,29 +429,39 @@ with st.sidebar:
     st.header("📊 Monthly Budget")
     bcol1, bcol2 = st.columns([0.65, 0.35])
     with bcol1:
-        budget_input = st.number_input("Budget", min_value=0.0, step=10.0, value=float(month_row.get("budget", 0.0)))
+        budget_input_s = st.number_input(
+            "Budget",
+            min_value=0.0,
+            step=10.0,
+            value=float(month_row.get("budget", 0.0)),
+            key="budget_sidebar",
+        )
     with bcol2:
-        currency_input = st.selectbox("Cur", list(CURRENCIES.keys()),
-                                      index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0)
+        currency_input_s = st.selectbox(
+            "Cur",
+            list(CURRENCIES.keys()),
+            index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0,
+            key="cur_sidebar",
+        )
 
-    if st.button("Save Budget", use_container_width=True):
-        update_month(user_id, selected_month, {"budget": float(budget_input), "currency": currency_input})
+    if st.button("Save Budget", use_container_width=True, key="save_budget_sidebar"):
+        update_month(user_id, selected_month, {"budget": float(budget_input_s), "currency": currency_input_s})
         st.success("Saved 🔒")
         st.rerun()
 
     st.divider()
 
     st.header("💸 Log Expense")
-    exp_amount = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt")
-    exp_desc = st.text_input("Description (optional)", key="exp_desc")
-    exp_category = st.selectbox("Category", CATEGORIES, key="exp_cat")
+    exp_amount_s = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_sidebar")
+    exp_desc_s = st.text_input("Description (optional)", key="exp_desc_sidebar")
+    exp_category_s = st.selectbox("Category", CATEGORIES, key="exp_cat_sidebar")
 
-    if st.button("Log Expense", use_container_width=True):
-        if exp_amount > 0:
-            add_expense(user_id, selected_month, float(exp_amount), exp_category, exp_desc.strip() if exp_desc else "")
-            if exp_category in WANTS and month_row.get("challenge_start"):
+    if st.button("Log Expense", use_container_width=True, key="log_exp_sidebar"):
+        if exp_amount_s > 0:
+            add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s.strip() if exp_desc_s else "")
+            if exp_category_s in WANTS and month_row.get("challenge_start"):
                 update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
-                st.warning("Challenge reset (wants expense logged).")
+                st.warning("Challenge reset (wants/other expense logged).")
             st.success("Logged ✅")
             st.rerun()
         else:
@@ -458,23 +470,122 @@ with st.sidebar:
     st.divider()
 
     st.header("💪 Savings / Assets")
-    asset_add = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add")
-    if st.button("Stack It", use_container_width=True):
-        if asset_add > 0:
-            new_assets = float(month_row.get("assets", 0.0)) + float(asset_add)
+    asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
+    if st.button("Stack It", use_container_width=True, key="stack_sidebar"):
+        if asset_add_s > 0:
+            new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_s)
             update_month(user_id, selected_month, {"assets": new_assets})
-            st.success(f"+{money(asset_add, currency)}")
+            st.success(f"+{money(asset_add_s, currency)}")
             st.rerun()
         else:
             st.info("Enter an amount above 0.")
 
 
 # =========================================================
-# Main UI
+# MAIN (mobile-first Quick Actions)
 # =========================================================
 st.title("💰 Spendline")
 st.caption("Set budget → log expenses → track remaining. Simple and clean.")
 
+# Mobile hint + quick actions
+st.markdown(
+    "<div class='small-hint'>On phone: use <strong>Quick Actions</strong> below. "
+    "The sidebar menu is easy to miss.</div>",
+    unsafe_allow_html=True,
+)
+
+# Month controls on main (important on mobile)
+mcol1, mcol2, mcol3 = st.columns([1, 1, 2])
+with mcol1:
+    if st.button("◀ Prev", use_container_width=True, key="prev_month_main"):
+        y, mth = map(int, selected_month.split("-"))
+        newd = date(y, mth, 1) - relativedelta(months=1)
+        st.session_state.selected_month = month_key(newd)
+        st.rerun()
+with mcol2:
+    if st.button("Next ▶", use_container_width=True, key="next_month_main"):
+        y, mth = map(int, selected_month.split("-"))
+        newd = date(y, mth, 1) + relativedelta(months=1)
+        st.session_state.selected_month = month_key(newd)
+        st.rerun()
+with mcol3:
+    st.write(f"**Month:** {selected_month}")
+
+st.markdown("### ⚡ Quick Actions")
+
+qa1, qa2, qa3 = st.tabs(["📊 Budget", "💸 Expense", "💪 Assets"])
+
+with qa1:
+    q1c1, q1c2 = st.columns([0.7, 0.3])
+    with q1c1:
+        budget_input_m = st.number_input(
+            "Monthly budget",
+            min_value=0.0,
+            step=10.0,
+            value=float(month_row.get("budget", 0.0)),
+            key="budget_main",
+        )
+    with q1c2:
+        currency_input_m = st.selectbox(
+            "Cur",
+            list(CURRENCIES.keys()),
+            index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0,
+            key="cur_main",
+        )
+
+    if st.button("Save Budget", use_container_width=True, key="save_budget_main"):
+        update_month(user_id, selected_month, {"budget": float(budget_input_m), "currency": currency_input_m})
+        st.success("Budget saved 🔒")
+        st.rerun()
+
+with qa2:
+    exp_amount_m = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_main")
+    exp_category_m = st.selectbox("Category", CATEGORIES, key="exp_cat_main")
+    exp_desc_m = st.text_input("Description (optional)", key="exp_desc_main")
+
+    if st.button("Log Expense", use_container_width=True, key="log_exp_main"):
+        if exp_amount_m > 0:
+            add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m.strip() if exp_desc_m else "")
+            # reset challenge on wants/other
+            if exp_category_m in WANTS and month_row.get("challenge_start"):
+                update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
+                st.warning("Challenge reset (wants/other expense logged).")
+            st.success("Expense logged ✅")
+            st.rerun()
+        else:
+            st.info("Enter an amount above 0.")
+
+with qa3:
+    asset_add_m = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_main")
+    if st.button("Stack It", use_container_width=True, key="stack_main"):
+        if asset_add_m > 0:
+            new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_m)
+            update_month(user_id, selected_month, {"assets": new_assets})
+            st.success(f"Added {money(asset_add_m, currency)} ✅")
+            st.rerun()
+        else:
+            st.info("Enter an amount above 0.")
+
+
+# =========================================================
+# Subtle first-time nudges (no big walkthrough)
+# =========================================================
+if "onboarding_done" not in st.session_state:
+    st.session_state.onboarding_done = False
+
+budget_val = float(month_row.get("budget", 0.0))
+if budget_val <= 0:
+    st.info("Start: set your **monthly budget** in Quick Actions → **Budget** (or sidebar) and press **Save Budget**.")
+elif len(expenses) == 0:
+    st.info("Next: log your first expense in **Quick Actions → Expense** to unlock your breakdown.")
+elif not st.session_state.onboarding_done:
+    st.session_state.onboarding_done = True
+    st.toast("You’re set. Keep it simple.", icon="✅")
+
+
+# =========================================================
+# Dashboard
+# =========================================================
 total_spent = sum_spent(expenses)
 remaining = float(month_row.get("budget", 0.0)) - total_spent
 net_worth = float(month_row.get("assets", 0.0)) - float(month_row.get("liabilities", 0.0))
@@ -489,9 +600,13 @@ c4.metric("Net Worth", money(float(net_worth), currency))
 if float(month_row.get("budget", 0.0)) > 0 and remaining < 0:
     st.error(f"Over budget by {money(abs(remaining), currency)}")
 
+
+# =========================================================
+# Breakdown charts
+# =========================================================
 st.markdown("### 📊 Breakdown")
 if not expenses:
-    st.info("Log your first expense to see charts and recent activity.")
+    st.info("Log an expense to see charts and recent activity.")
 else:
     df = pd.DataFrame(expenses)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
@@ -511,6 +626,10 @@ else:
         bar.update_layout(xaxis_title="", yaxis_title="", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(bar, use_container_width=True)
 
+
+# =========================================================
+# Tabs
+# =========================================================
 tab_recent, tab_challenge, tab_history, tab_settings = st.tabs(
     ["🧾 Recent", "🛑 Challenge", "🗂️ History", "⚙️ Settings"]
 )
@@ -546,13 +665,13 @@ with tab_challenge:
             st.success("Challenge complete 💪")
     else:
         b1, b2, b3 = st.columns(3)
-        if b1.button("7 days", use_container_width=True):
+        if b1.button("7 days", use_container_width=True, key="ch7"):
             update_month(user_id, selected_month, {"challenge_length": 7, "challenge_start": date.today().isoformat()})
             st.rerun()
-        if b2.button("14 days", use_container_width=True):
+        if b2.button("14 days", use_container_width=True, key="ch14"):
             update_month(user_id, selected_month, {"challenge_length": 14, "challenge_start": date.today().isoformat()})
             st.rerun()
-        if b3.button("30 days", use_container_width=True):
+        if b3.button("30 days", use_container_width=True, key="ch30"):
             update_month(user_id, selected_month, {"challenge_length": 30, "challenge_start": date.today().isoformat()})
             st.rerun()
 
@@ -586,15 +705,40 @@ with tab_history:
 
         st.dataframe(pd.DataFrame(out), use_container_width=True, hide_index=True)
 
+        st.divider()
+        if st.button("Export current month (CSV)", use_container_width=True, key="export_csv"):
+            if not expenses:
+                st.info("No expenses to export for this month.")
+            else:
+                csv_df = df.copy().rename(columns={"occurred_at": "date", "description": "desc"})
+                st.download_button(
+                    "Download CSV",
+                    csv_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"spendline_{selected_month}_expenses.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
 with tab_settings:
     st.markdown("### Settings")
-    theme_choice = st.radio("Theme", ["Light", "Dark"], index=0 if theme == "Light" else 1)
 
-    if st.button("Apply Theme", use_container_width=True):
+    theme_choice = st.radio("Theme", ["Light", "Dark"], index=0 if theme == "Light" else 1, key="theme_radio")
+
+    if st.button("Apply Theme", use_container_width=True, key="apply_theme"):
         try:
-            sb.auth.update_user({"data": {"theme": theme_choice}})
+            sb.auth.update_user({"data": {**(md if isinstance(md, dict) else {}), "theme": theme_choice}})
         except Exception as e:
             st.error(f"Could not update theme: {e}")
         st.rerun()
 
-st.caption("Spendline — quiet wealth in motion.")
+    st.divider()
+    if st.button("Log out", use_container_width=True, key="logout_settings"):
+        try:
+            sb.auth.sign_out()
+        except Exception:
+            pass
+        clear_user()
+        st.rerun()
+
+
+st.caption(f"{APP_NAME} • quiet wealth in motion.")
