@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, date
-from dateutil.relativedelta import relativedelta
 
 import pandas as pd
 import plotly.express as px
@@ -10,11 +9,10 @@ from supabase import create_client, Client
 
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
-# Mobile-first fix:
-#   - Sidebar inputs are hard to discover on mobile.
+# Mobile-first fix (no Prev/Next month buttons):
+#   - Sidebar can be hidden on mobile.
 #   - Add "Quick Actions" on the main page (Budget / Expense / Assets)
-#     so the flow is obvious on phones.
-# Desktop still benefits from the sidebar.
+#   - Month switching happens ONLY in Monthly History (as requested).
 # =========================================================
 
 APP_NAME = "Spendline v0.1"
@@ -267,6 +265,17 @@ def sum_spent(expenses: list[dict]) -> float:
     return float(sum(float(e["amount"]) for e in expenses))
 
 
+def month_spent_total(user_id: str, mk: str) -> float:
+    ex = (
+        sb.table("expenses")
+        .select("amount")
+        .eq("user_id", user_id)
+        .eq("month", mk)
+        .execute()
+    )
+    return float(sum(float(e["amount"]) for e in (ex.data or [])))
+
+
 # =========================================================
 # AUTH SCREEN (Supabase Auth)
 # =========================================================
@@ -312,7 +321,6 @@ def auth_screen():
                 st.success("Check your email to confirm your account, then log in.")
                 return
 
-            # Store profile + theme in metadata
             try:
                 sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
             except Exception:
@@ -380,11 +388,12 @@ except Exception:
 
 inject_theme(theme)
 
-# Month selection
+# Selected month: default current month; switching happens ONLY in History tab
 today = date.today()
 current_month = month_key(today)
 if "selected_month" not in st.session_state:
     st.session_state.selected_month = current_month
+
 selected_month = st.session_state.selected_month
 
 # Load data
@@ -407,21 +416,6 @@ with st.sidebar:
         except Exception:
             pass
         clear_user()
-        st.rerun()
-
-    st.divider()
-
-    st.caption("Month")
-    colm1, colm2 = st.columns(2)
-    if colm1.button("◀ Prev", use_container_width=True, key="prev_month_sidebar"):
-        y, mth = map(int, selected_month.split("-"))
-        newd = date(y, mth, 1) - relativedelta(months=1)
-        st.session_state.selected_month = month_key(newd)
-        st.rerun()
-    if colm2.button("Next ▶", use_container_width=True, key="next_month_sidebar"):
-        y, mth = map(int, selected_month.split("-"))
-        newd = date(y, mth, 1) + relativedelta(months=1)
-        st.session_state.selected_month = month_key(newd)
         st.rerun()
 
     st.divider()
@@ -458,7 +452,10 @@ with st.sidebar:
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_sidebar"):
         if exp_amount_s > 0:
-            add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s.strip() if exp_desc_s else "")
+            add_expense(
+                user_id, selected_month, float(exp_amount_s),
+                exp_category_s, exp_desc_s.strip() if exp_desc_s else ""
+            )
             if exp_category_s in WANTS and month_row.get("challenge_start"):
                 update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
                 st.warning("Challenge reset (wants/other expense logged).")
@@ -485,34 +482,19 @@ with st.sidebar:
 # MAIN (mobile-first Quick Actions)
 # =========================================================
 st.title("💰 Spendline")
-st.caption("Set budget → log expenses → track remaining. Simple and clean.")
+st.caption("Set budget → log expenses → stack assets. Then check your numbers.")
 
-# Mobile hint + quick actions
+# Mobile hint (quick + direct)
 st.markdown(
     "<div class='small-hint'>On phone: use <strong>Quick Actions</strong> below. "
-    "The sidebar menu is easy to miss.</div>",
+    "The sidebar menu can be easy to miss.</div>",
     unsafe_allow_html=True,
 )
 
-# Month controls on main (important on mobile)
-mcol1, mcol2, mcol3 = st.columns([1, 1, 2])
-with mcol1:
-    if st.button("◀ Prev", use_container_width=True, key="prev_month_main"):
-        y, mth = map(int, selected_month.split("-"))
-        newd = date(y, mth, 1) - relativedelta(months=1)
-        st.session_state.selected_month = month_key(newd)
-        st.rerun()
-with mcol2:
-    if st.button("Next ▶", use_container_width=True, key="next_month_main"):
-        y, mth = map(int, selected_month.split("-"))
-        newd = date(y, mth, 1) + relativedelta(months=1)
-        st.session_state.selected_month = month_key(newd)
-        st.rerun()
-with mcol3:
-    st.write(f"**Month:** {selected_month}")
+# Current month label (no prev/next buttons)
+st.write(f"**Month:** {selected_month}")
 
 st.markdown("### ⚡ Quick Actions")
-
 qa1, qa2, qa3 = st.tabs(["📊 Budget", "💸 Expense", "💪 Assets"])
 
 with qa1:
@@ -545,8 +527,10 @@ with qa2:
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_main"):
         if exp_amount_m > 0:
-            add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m.strip() if exp_desc_m else "")
-            # reset challenge on wants/other
+            add_expense(
+                user_id, selected_month, float(exp_amount_m),
+                exp_category_m, exp_desc_m.strip() if exp_desc_m else ""
+            )
             if exp_category_m in WANTS and month_row.get("challenge_start"):
                 update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
                 st.warning("Challenge reset (wants/other expense logged).")
@@ -575,9 +559,9 @@ if "onboarding_done" not in st.session_state:
 
 budget_val = float(month_row.get("budget", 0.0))
 if budget_val <= 0:
-    st.info("Start: set your **monthly budget** in Quick Actions → **Budget** (or sidebar) and press **Save Budget**.")
+    st.info("Start: set your **monthly budget** in Quick Actions → **Budget**, then press **Save Budget**.")
 elif len(expenses) == 0:
-    st.info("Next: log your first expense in **Quick Actions → Expense** to unlock your breakdown.")
+    st.info("Next: log your first expense in Quick Actions → **Expense** to unlock your breakdown.")
 elif not st.session_state.onboarding_done:
     st.session_state.onboarding_done = True
     st.toast("You’re set. Keep it simple.", icon="✅")
@@ -631,7 +615,7 @@ else:
 # Tabs
 # =========================================================
 tab_recent, tab_challenge, tab_history, tab_settings = st.tabs(
-    ["🧾 Recent", "🛑 Challenge", "🗂️ History", "⚙️ Settings"]
+    ["🧾 Recent", "🛑 Challenge", "🗂️ Monthly History", "⚙️ Settings"]
 )
 
 with tab_recent:
@@ -679,22 +663,31 @@ with tab_history:
     st.markdown("### Monthly History")
     rows = monthly_history(user_id)
 
-    if not rows:
+    # Month picker is the ONLY navigation (as requested)
+    months = [r["month"] for r in rows] if rows else []
+    if current_month not in months:
+        months = [current_month] + months
+
+    if not months:
         st.info("No history yet.")
     else:
+        # Pick month
+        try:
+            idx = months.index(selected_month)
+        except ValueError:
+            idx = 0
+
+        picked = st.selectbox("View month", months, index=idx, key="month_picker")
+        if picked != selected_month:
+            st.session_state.selected_month = picked
+            st.rerun()
+
+        # Table summary
         out = []
         for r in rows:
             mk = r["month"]
             cur = r.get("currency", "USD")
-
-            ex = (
-                sb.table("expenses")
-                .select("amount")
-                .eq("user_id", user_id)
-                .eq("month", mk)
-                .execute()
-            )
-            spent = float(sum(float(e["amount"]) for e in (ex.data or [])))
+            spent = month_spent_total(user_id, mk)
             out.append({
                 "Month": mk,
                 "Cur": cur,
@@ -703,14 +696,17 @@ with tab_history:
                 "Remaining": money(float(r.get("budget", 0.0)) - spent, cur),
             })
 
-        st.dataframe(pd.DataFrame(out), use_container_width=True, hide_index=True)
+        if out:
+            st.dataframe(pd.DataFrame(out), use_container_width=True, hide_index=True)
 
         st.divider()
         if st.button("Export current month (CSV)", use_container_width=True, key="export_csv"):
             if not expenses:
                 st.info("No expenses to export for this month.")
             else:
-                csv_df = df.copy().rename(columns={"occurred_at": "date", "description": "desc"})
+                csv_df = pd.DataFrame(expenses).copy()
+                csv_df["occurred_at"] = pd.to_datetime(csv_df["occurred_at"], errors="coerce")
+                csv_df = csv_df.rename(columns={"occurred_at": "date", "description": "desc"})
                 st.download_button(
                     "Download CSV",
                     csv_df.to_csv(index=False).encode("utf-8"),
@@ -726,7 +722,10 @@ with tab_settings:
 
     if st.button("Apply Theme", use_container_width=True, key="apply_theme"):
         try:
-            sb.auth.update_user({"data": {**(md if isinstance(md, dict) else {}), "theme": theme_choice}})
+            # Preserve other metadata (name/country) while updating theme
+            new_md = dict(md) if isinstance(md, dict) else {}
+            new_md["theme"] = theme_choice
+            sb.auth.update_user({"data": new_md})
         except Exception as e:
             st.error(f"Could not update theme: {e}")
         st.rerun()
