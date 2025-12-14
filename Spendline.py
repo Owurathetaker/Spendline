@@ -18,11 +18,13 @@ from supabase import create_client, Client
 #   - NO Prev/Next buttons
 #   - Month selection ONLY in Monthly History (dropdown)
 #
-# Fixes / polish:
-#   - Button text always visible (white)
+# Safety + UX:
+#   - Button text always visible
 #   - Guardrails (min/max amounts)
-#   - Friendly DB error handling (no scary traces)
-#   - Beta footer
+#   - Friendly DB errors (no scary traces)
+#   - Delete single expense
+#   - Delete single asset entry (requires asset_events table)
+#   - Reset current month (expenses + asset events, optionally keep budget)
 # =========================================================
 
 APP_NAME = "Spendline v1.0 (beta)"
@@ -122,7 +124,7 @@ div[data-testid="stMetricValue"] * {{
 
 div[data-testid="stButton"] button {{
   background: var(--primary) !important;
-  color: #ffffff !important;                 /* FIX: always visible */
+  color: #ffffff !important;                 /* always visible */
   border-radius: 12px !important;
   border: 1px solid rgba(0,0,0,0.06) !important;
   font-weight: 800 !important;
@@ -145,6 +147,13 @@ div[data-testid="stButton"] button:active {{
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0.6rem 0.75rem;
+}}
+
+.mini-card {{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: .65rem .75rem;
+  background: var(--card);
 }}
 
 @media (max-width: 480px) {{
@@ -173,10 +182,8 @@ def supabase_client() -> Client:
 sb = supabase_client()
 
 
-# ----------------------------
-# Attach user JWT to PostgREST (CRITICAL for RLS)
-# ----------------------------
 def apply_db_auth(access_token: str | None) -> None:
+    """Attach the current user's JWT for RLS-protected queries."""
     if not access_token:
         return
     try:
@@ -200,12 +207,16 @@ def money(x: float, code: str) -> str:
     return f"{sym(code)}{x:,.2f}"
 
 
-def clamp_guardrails(x: float) -> tuple[bool, str]:
+def guard_amount(x: float) -> tuple[bool, str]:
     if x < MIN_AMOUNT:
         return False, "Amount must be greater than 0."
     if x > MAX_AMOUNT:
         return False, "That amount looks too large. Check for typos."
     return True, ""
+
+
+def friendly_db_error():
+    st.error("Couldn’t save that right now. Please try again.")
 
 
 def get_user():
@@ -225,7 +236,7 @@ def clear_user():
 
 
 # ----------------------------
-# DB ops
+# DB ops (months + expenses + asset_events)
 # ----------------------------
 def ensure_month_row(user_id: str, month: str):
     res = sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute()
@@ -251,18 +262,6 @@ def update_month(user_id: str, month: str, patch: dict):
     return sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute()
 
 
-def add_expense(user_id: str, month: str, amount: float, category: str, desc: str | None):
-    row = {
-        "user_id": user_id,
-        "month": month,
-        "amount": float(amount),
-        "category": category,
-        "description": (desc or "").strip() or None,
-        "occurred_at": datetime.utcnow().isoformat(),
-    }
-    return sb.table("expenses").insert(row).execute()
-
-
 def fetch_expenses(user_id: str, month: str):
     res = (
         sb.table("expenses")
@@ -276,34 +275,78 @@ def fetch_expenses(user_id: str, month: str):
     return res.data or []
 
 
-def monthly_history(user_id: str):
+def add_expense(user_id: str, month: str, amount: float, category: str, desc: str | None):
+    row = {
+        "user_id": user_id,
+        "month": month,
+        "amount": float(amount),
+        "category": category,
+        "description": (desc or "").strip() or None,
+        "occurred_at": datetime.utcnow().isoformat(),
+    }
+    return sb.table("expenses").insert(row).execute()
+
+
+def delete_expense_row(expense_id: str):
+    return sb.table("expenses").delete().eq("id", expense_id).execute()
+
+
+def fetch_asset_events(user_id: str, month: str):
+    # Requires asset_events table (see SQL in the message above)
     res = (
-        sb.table("months")
-        .select("month, currency, budget, assets, liabilities")
+        sb.table("asset_events")
+        .select("id, created_at, amount, note")
         .eq("user_id", user_id)
-        .order("month", desc=True)
+        .eq("month", month)
+        .order("created_at", desc=True)
+        .limit(500)
         .execute()
     )
     return res.data or []
+
+
+def add_asset_event(user_id: str, month: str, amount: float, note: str | None):
+    row = {
+        "user_id": user_id,
+        "month": month,
+        "amount": float(amount),
+        "note": (note or "").strip() or None,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    return sb.table("asset_events").insert(row).execute()
+
+
+def delete_asset_event(asset_event_id: str):
+    return sb.table("asset_events").delete().eq("id", asset_event_id).execute()
 
 
 def sum_spent(expenses: list[dict]) -> float:
     return float(sum(float(e["amount"]) for e in expenses))
 
 
+def sum_assets(asset_events: list[dict]) -> float:
+    return float(sum(float(a["amount"]) for a in asset_events))
+
+
 def month_spent_total(user_id: str, mk: str) -> float:
-    ex = (
-        sb.table("expenses")
-        .select("amount")
-        .eq("user_id", user_id)
-        .eq("month", mk)
-        .execute()
-    )
+    ex = sb.table("expenses").select("amount").eq("user_id", user_id).eq("month", mk).execute()
     return float(sum(float(e["amount"]) for e in (ex.data or [])))
 
 
-def friendly_db_error():
-    st.error("Couldn’t save that right now. Please try again.")
+def reset_current_month(user_id: str, month: str, keep_budget: bool):
+    # Delete expenses + asset events for the month, reset challenge; optionally reset budget
+    sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute()
+    sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute()
+
+    patch = {
+        "challenge_start": None,
+        "challenge_length": None,
+        "assets": 0,
+    }
+    if not keep_budget:
+        patch["budget"] = 0
+
+    sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute()
 
 
 # =========================================================
@@ -425,9 +468,21 @@ if "selected_month" not in st.session_state:
     st.session_state.selected_month = current_month
 selected_month = st.session_state.selected_month
 
-# Load data
+# Load rows
 month_row = ensure_month_row(user_id, selected_month)
+
+# Load lists
 expenses = fetch_expenses(user_id, selected_month)
+
+# Asset events require the new table; if missing, show a helpful error once.
+asset_events: list[dict] = []
+asset_events_error = False
+try:
+    asset_events = fetch_asset_events(user_id, selected_month)
+except Exception:
+    asset_events_error = True
+    asset_events = []
+
 currency = month_row.get("currency", "USD")
 
 
@@ -468,7 +523,7 @@ with st.sidebar:
         )
 
     if st.button("Save Budget", use_container_width=True, key="save_budget_sidebar"):
-        ok, msg = clamp_guardrails(float(budget_input_s))
+        ok, msg = guard_amount(float(budget_input_s))
         if not ok:
             st.error(msg)
         else:
@@ -487,12 +542,13 @@ with st.sidebar:
     exp_category_s = st.selectbox("Category", CATEGORIES, key="exp_cat_sidebar")
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_sidebar"):
-        ok, msg = clamp_guardrails(float(exp_amount_s))
+        ok, msg = guard_amount(float(exp_amount_s))
         if not ok:
             st.error(msg)
         else:
             try:
                 add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s)
+                # reset challenge on wants/other
                 if exp_category_s in WANTS and month_row.get("challenge_start"):
                     update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
                     st.warning("Challenge reset (wants/other expense logged).")
@@ -505,18 +561,26 @@ with st.sidebar:
 
     st.header("💪 Savings / Assets")
     asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
+    asset_note_s = st.text_input("Note (optional)", key="asset_note_sidebar")
     if st.button("Stack It", use_container_width=True, key="stack_sidebar"):
-        ok, msg = clamp_guardrails(float(asset_add_s))
+        ok, msg = guard_amount(float(asset_add_s))
         if not ok:
             st.error(msg)
         else:
-            try:
-                new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_s)
-                update_month(user_id, selected_month, {"assets": new_assets})
-                st.success(f"+{money(asset_add_s, currency)}")
-                st.rerun()
-            except Exception:
-                friendly_db_error()
+            if asset_events_error:
+                st.error("Assets table not set up yet. Add the `asset_events` table in Supabase first.")
+            else:
+                try:
+                    add_asset_event(user_id, selected_month, float(asset_add_s), asset_note_s)
+
+                    # keep a cached monthly total in months.assets (optional but nice for net worth)
+                    new_assets_total = float(month_row.get("assets", 0.0)) + float(asset_add_s)
+                    update_month(user_id, selected_month, {"assets": new_assets_total})
+
+                    st.success(f"+{money(asset_add_s, currency)}")
+                    st.rerun()
+                except Exception:
+                    friendly_db_error()
 
 
 # =========================================================
@@ -533,10 +597,10 @@ st.markdown(
 
 st.write(f"**Month:** {selected_month}")
 
-# Decide which action should appear first (tabs can't be auto-selected, so reorder)
 budget_val = float(month_row.get("budget", 0.0))
 no_expenses = len(expenses) == 0
 
+# Reorder tabs so the likely next action is first
 if budget_val <= 0:
     tab_order = ["📊 Budget", "💸 Expense", "💪 Assets"]
 elif no_expenses:
@@ -568,7 +632,7 @@ with tabs["📊 Budget"]:
         )
 
     if st.button("Save Budget", use_container_width=True, key="save_budget_main"):
-        ok, msg = clamp_guardrails(float(budget_input_m))
+        ok, msg = guard_amount(float(budget_input_m))
         if not ok:
             st.error(msg)
         else:
@@ -586,7 +650,7 @@ with tabs["💸 Expense"]:
     exp_desc_m = st.text_input("Description (optional)", key="exp_desc_main")
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_main"):
-        ok, msg = clamp_guardrails(float(exp_amount_m))
+        ok, msg = guard_amount(float(exp_amount_m))
         if not ok:
             st.error(msg)
         else:
@@ -603,20 +667,25 @@ with tabs["💸 Expense"]:
 # ---- Assets tab
 with tabs["💪 Assets"]:
     asset_add_m = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_main")
+    asset_note_m = st.text_input("Note (optional)", key="asset_note_main")
     if st.button("Stack It", use_container_width=True, key="stack_main"):
-        ok, msg = clamp_guardrails(float(asset_add_m))
+        ok, msg = guard_amount(float(asset_add_m))
         if not ok:
             st.error(msg)
         else:
-            try:
-                new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_m)
-                update_month(user_id, selected_month, {"assets": new_assets})
-                st.success(f"Added {money(asset_add_m, currency)} ✅")
-                st.rerun()
-            except Exception:
-                friendly_db_error()
+            if asset_events_error:
+                st.error("Assets table not set up yet. Add the `asset_events` table in Supabase first.")
+            else:
+                try:
+                    add_asset_event(user_id, selected_month, float(asset_add_m), asset_note_m)
+                    new_assets_total = float(month_row.get("assets", 0.0)) + float(asset_add_m)
+                    update_month(user_id, selected_month, {"assets": new_assets_total})
+                    st.success(f"Added {money(asset_add_m, currency)} ✅")
+                    st.rerun()
+                except Exception:
+                    friendly_db_error()
 
-# Subtle nudges (compact)
+# Subtle nudges
 if "onboarding_done" not in st.session_state:
     st.session_state.onboarding_done = False
 
@@ -633,8 +702,9 @@ elif not st.session_state.onboarding_done:
 # Dashboard
 # =========================================================
 total_spent = sum_spent(expenses)
+assets_total = float(month_row.get("assets", 0.0))
 remaining = float(month_row.get("budget", 0.0)) - total_spent
-net_worth = float(month_row.get("assets", 0.0)) - float(month_row.get("liabilities", 0.0))
+net_worth = assets_total - float(month_row.get("liabilities", 0.0))
 
 st.markdown("### 📈 Overview")
 c1, c2, c3, c4 = st.columns(4)
@@ -685,13 +755,61 @@ with tab_recent:
     if not expenses:
         st.info("No expenses yet.")
     else:
-        show = df.sort_values("occurred_at", ascending=False).head(30)[
-            ["occurred_at", "category", "description", "amount"]
-        ].copy()
-        show["occurred_at"] = show["occurred_at"].dt.strftime("%Y-%m-%d %H:%M")
-        show["amount"] = show["amount"].apply(lambda x: money(float(x), currency))
-        show = show.rename(columns={"occurred_at": "date", "description": "desc"})
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        # Show a clean list + delete buttons
+        for e in expenses[:40]:
+            left, right = st.columns([0.82, 0.18])
+            occurred = e.get("occurred_at")
+            when = ""
+            try:
+                when = pd.to_datetime(occurred).strftime("%b %d, %H:%M") if occurred else ""
+            except Exception:
+                when = ""
+
+            desc = (e.get("description") or "").strip()
+            label = f"**{e.get('category','Other')}** — {money(float(e.get('amount',0.0)), currency)}"
+            meta = f"{when}" + (f" • {desc}" if desc else "")
+            left.markdown(f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>", unsafe_allow_html=True)
+
+            if right.button("Delete", key=f"del_exp_{e['id']}", use_container_width=True):
+                try:
+                    delete_expense_row(e["id"])
+                    st.toast("Expense deleted", icon="🗑️")
+                    st.rerun()
+                except Exception:
+                    friendly_db_error()
+
+    st.divider()
+    st.markdown("### Asset Entries")
+    if asset_events_error:
+        st.info("Assets delete needs the `asset_events` table (see SQL in setup).")
+    elif not asset_events:
+        st.info("No asset entries yet.")
+    else:
+        for a in asset_events[:40]:
+            left, right = st.columns([0.82, 0.18])
+            when = ""
+            try:
+                when = pd.to_datetime(a.get("created_at")).strftime("%b %d, %H:%M") if a.get("created_at") else ""
+            except Exception:
+                when = ""
+            note = (a.get("note") or "").strip()
+            label = f"**+{money(float(a.get('amount',0.0)), currency)}**"
+            meta = f"{when}" + (f" • {note}" if note else "")
+            left.markdown(f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>", unsafe_allow_html=True)
+
+            if right.button("Delete", key=f"del_asset_{a['id']}", use_container_width=True):
+                try:
+                    delete_asset_event(a["id"])
+
+                    # Keep months.assets in sync: subtract the deleted amount (floor at 0)
+                    deleted_amt = float(a.get("amount") or 0.0)
+                    new_assets = max(0.0, float(month_row.get("assets", 0.0)) - deleted_amt)
+                    update_month(user_id, selected_month, {"assets": new_assets})
+
+                    st.toast("Asset entry deleted", icon="🗑️")
+                    st.rerun()
+                except Exception:
+                    friendly_db_error()
 
 with tab_challenge:
     st.markdown("### No-Spend Challenge")
@@ -754,6 +872,7 @@ with tab_history:
             st.session_state.selected_month = picked
             st.rerun()
 
+        # Summary table: spent per month
         out = []
         for r in rows:
             mk = r["month"]
@@ -775,12 +894,12 @@ with tab_history:
             if not expenses:
                 st.info("No expenses to export for this month.")
             else:
-                csv_df = pd.DataFrame(expenses).copy()
-                csv_df["occurred_at"] = pd.to_datetime(csv_df["occurred_at"], errors="coerce")
-                csv_df = csv_df.rename(columns={"occurred_at": "date", "description": "desc"})
+                df_csv = pd.DataFrame(expenses).copy()
+                df_csv["occurred_at"] = pd.to_datetime(df_csv["occurred_at"], errors="coerce")
+                df_csv = df_csv.rename(columns={"occurred_at": "date", "description": "desc"})
                 st.download_button(
                     "Download CSV",
-                    csv_df.to_csv(index=False).encode("utf-8"),
+                    df_csv.to_csv(index=False).encode("utf-8"),
                     file_name=f"spendline_{selected_month}_expenses.csv",
                     mime="text/csv",
                     use_container_width=True,
@@ -800,6 +919,24 @@ with tab_settings:
         except Exception:
             friendly_db_error()
         st.rerun()
+
+    st.divider()
+    st.markdown("### Reset data")
+    keep_budget = st.checkbox("Keep my budget for this month", value=True, key="keep_budget_reset")
+    confirm = st.checkbox("I understand this will delete expenses & asset entries for this month", value=False, key="confirm_reset")
+
+    if st.button("Reset current month", use_container_width=True, key="reset_month_btn"):
+        if not confirm:
+            st.warning("Tick the confirmation box first.")
+        elif asset_events_error:
+            st.error("Assets table not set up yet. Add the `asset_events` table first, then reset.")
+        else:
+            try:
+                reset_current_month(user_id, selected_month, keep_budget=keep_budget)
+                st.success("Current month reset.")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
     st.divider()
     if st.button("Log out", use_container_width=True, key="logout_settings"):
