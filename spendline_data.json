@@ -1,0 +1,69 @@
+{
+  "settings": {
+    "theme": "Light",
+    "currency_label": "USD ($)"
+  },
+  "months": {
+    "2025-12": {
+      "currency": "USD",
+      "budget": 65330.0,
+      "assets": 0.0,
+      "liabilities": 0.0,
+      "expenses": [
+        {
+          "date": "2025-12-13 12:24",
+          "amount": 3422.0,
+          "desc": "Expense",
+          "category": "Food & Dining"
+        },
+        {
+          "date": "2025-12-13 12:24",
+          "amount": 4302.0,
+          "desc": "Expense",
+          "category": "Subscriptions"
+        },
+        {
+          "date": "2025-12-13 12:25",
+          "amount": 1102.0,
+          "desc": "Expense",
+          "category": "Health"
+        },
+        {
+          "date": "2025-12-13 12:25",
+          "amount": 879.0,
+          "desc": "Expense",
+          "category": "Shopping"
+        },
+        {
+          "date": "2025-12-13 12:26",
+          "amount": 879.0,
+          "desc": "Expense",
+          "category": "Entertainment"
+        }
+      ],
+      "challenge_start": "2025-12-13",
+      "challenge_length": 7
+    }
+  },
+  "app": {
+    "version": 1
+  },
+  "users": {
+    "persiejay7@gmail.com": {
+      "profile": {
+        "name": "pee",
+        "email": "persiejay7@gmail.com",
+        "country": "GH",
+        "created_at": "2025-12-13T14:49:56"
+      },
+      "auth": {
+        "salt": "ddb23a877d74f042986a82c436d4522e",
+        "pwd_hash": "85d7abc7b3f13bd5e4f8d6ad1f025ad7ba06cb318b57ce94e4a48e699be2d09f"
+      },
+      "settings": {
+        "theme": "Light"
+      },
+      "months": {}
+    }
+  }
+}
