@@ -9,17 +9,23 @@ from supabase import create_client, Client
 
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
+#
 # Mobile-first:
 #   - Main-page "Start here" actions (Budget / Expense / Assets)
 #   - Sidebar still works on desktop, but mobile doesn't depend on it
+#
 # Month switching:
 #   - NO Prev/Next buttons
 #   - Month selection ONLY in Monthly History (dropdown)
-# Fix:
-#   - Green button text visibility (set to white)
+#
+# Fixes / polish:
+#   - Button text always visible (white)
+#   - Guardrails (min/max amounts)
+#   - Friendly DB error handling (no scary traces)
+#   - Beta footer
 # =========================================================
 
-APP_NAME = "Spendline v0.1"
+APP_NAME = "Spendline v1.0 (beta)"
 
 CATEGORIES = [
     "Food & Dining", "Transport", "Entertainment", "Shopping",
@@ -28,6 +34,9 @@ CATEGORIES = [
 WANTS = {"Entertainment", "Shopping", "Subscriptions", "Other"}
 
 CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
+
+MIN_AMOUNT = 0.01
+MAX_AMOUNT = 1_000_000.0
 
 
 # ----------------------------
@@ -191,6 +200,14 @@ def money(x: float, code: str) -> str:
     return f"{sym(code)}{x:,.2f}"
 
 
+def clamp_guardrails(x: float) -> tuple[bool, str]:
+    if x < MIN_AMOUNT:
+        return False, "Amount must be greater than 0."
+    if x > MAX_AMOUNT:
+        return False, "That amount looks too large. Check for typos."
+    return True, ""
+
+
 def get_user():
     return st.session_state.get("sb_user")
 
@@ -283,6 +300,10 @@ def month_spent_total(user_id: str, mk: str) -> float:
         .execute()
     )
     return float(sum(float(e["amount"]) for e in (ex.data or [])))
+
+
+def friendly_db_error():
+    st.error("Couldn’t save that right now. Please try again.")
 
 
 # =========================================================
@@ -447,9 +468,16 @@ with st.sidebar:
         )
 
     if st.button("Save Budget", use_container_width=True, key="save_budget_sidebar"):
-        update_month(user_id, selected_month, {"budget": float(budget_input_s), "currency": currency_input_s})
-        st.success("Saved 🔒")
-        st.rerun()
+        ok, msg = clamp_guardrails(float(budget_input_s))
+        if not ok:
+            st.error(msg)
+        else:
+            try:
+                update_month(user_id, selected_month, {"budget": float(budget_input_s), "currency": currency_input_s})
+                st.success("Saved 🔒")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
     st.divider()
 
@@ -459,28 +487,36 @@ with st.sidebar:
     exp_category_s = st.selectbox("Category", CATEGORIES, key="exp_cat_sidebar")
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_sidebar"):
-        if exp_amount_s > 0:
-            add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s)
-            if exp_category_s in WANTS and month_row.get("challenge_start"):
-                update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
-                st.warning("Challenge reset (wants/other expense logged).")
-            st.success("Logged ✅")
-            st.rerun()
+        ok, msg = clamp_guardrails(float(exp_amount_s))
+        if not ok:
+            st.error(msg)
         else:
-            st.info("Enter an amount above 0.")
+            try:
+                add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s)
+                if exp_category_s in WANTS and month_row.get("challenge_start"):
+                    update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
+                    st.warning("Challenge reset (wants/other expense logged).")
+                st.success("Logged ✅")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
     st.divider()
 
     st.header("💪 Savings / Assets")
     asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
     if st.button("Stack It", use_container_width=True, key="stack_sidebar"):
-        if asset_add_s > 0:
-            new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_s)
-            update_month(user_id, selected_month, {"assets": new_assets})
-            st.success(f"+{money(asset_add_s, currency)}")
-            st.rerun()
+        ok, msg = clamp_guardrails(float(asset_add_s))
+        if not ok:
+            st.error(msg)
         else:
-            st.info("Enter an amount above 0.")
+            try:
+                new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_s)
+                update_month(user_id, selected_month, {"assets": new_assets})
+                st.success(f"+{money(asset_add_s, currency)}")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
 
 # =========================================================
@@ -490,7 +526,7 @@ st.title("💰 Spendline")
 st.caption("Set budget → log expenses → stack assets. Then check your numbers.")
 
 st.markdown(
-    "<div class='small-hint'>On phone: use <strong>Start here</strong> below. "
+    "<div class='small-hint'>On phone: tap <strong>Start here</strong> → Budget / Expense / Assets. "
     "The sidebar menu can be easy to miss.</div>",
     unsafe_allow_html=True,
 )
@@ -510,8 +546,6 @@ else:
 
 st.markdown("### ✅ Start here")
 t1, t2, t3 = st.tabs(tab_order)
-
-# Helpers to map which tab is which
 tabs = {tab_order[0]: t1, tab_order[1]: t2, tab_order[2]: t3}
 
 # ---- Budget tab
@@ -534,9 +568,16 @@ with tabs["📊 Budget"]:
         )
 
     if st.button("Save Budget", use_container_width=True, key="save_budget_main"):
-        update_month(user_id, selected_month, {"budget": float(budget_input_m), "currency": currency_input_m})
-        st.success("Budget saved 🔒")
-        st.rerun()
+        ok, msg = clamp_guardrails(float(budget_input_m))
+        if not ok:
+            st.error(msg)
+        else:
+            try:
+                update_month(user_id, selected_month, {"budget": float(budget_input_m), "currency": currency_input_m})
+                st.success("Budget saved 🔒")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
 # ---- Expense tab
 with tabs["💸 Expense"]:
@@ -545,27 +586,35 @@ with tabs["💸 Expense"]:
     exp_desc_m = st.text_input("Description (optional)", key="exp_desc_main")
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_main"):
-        if exp_amount_m > 0:
-            add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m)
-            if exp_category_m in WANTS and month_row.get("challenge_start"):
-                update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
-                st.warning("Challenge reset (wants/other expense logged).")
-            st.success("Expense logged ✅")
-            st.rerun()
+        ok, msg = clamp_guardrails(float(exp_amount_m))
+        if not ok:
+            st.error(msg)
         else:
-            st.info("Enter an amount above 0.")
+            try:
+                add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m)
+                if exp_category_m in WANTS and month_row.get("challenge_start"):
+                    update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
+                    st.warning("Challenge reset (wants/other expense logged).")
+                st.success("Expense logged ✅")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
 # ---- Assets tab
 with tabs["💪 Assets"]:
     asset_add_m = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_main")
     if st.button("Stack It", use_container_width=True, key="stack_main"):
-        if asset_add_m > 0:
-            new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_m)
-            update_month(user_id, selected_month, {"assets": new_assets})
-            st.success(f"Added {money(asset_add_m, currency)} ✅")
-            st.rerun()
+        ok, msg = clamp_guardrails(float(asset_add_m))
+        if not ok:
+            st.error(msg)
         else:
-            st.info("Enter an amount above 0.")
+            try:
+                new_assets = float(month_row.get("assets", 0.0)) + float(asset_add_m)
+                update_month(user_id, selected_month, {"assets": new_assets})
+                st.success(f"Added {money(asset_add_m, currency)} ✅")
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
 # Subtle nudges (compact)
 if "onboarding_done" not in st.session_state:
@@ -649,40 +698,51 @@ with tab_challenge:
     st.caption("Logging a wants/other expense resets the challenge automatically.")
 
     if month_row.get("challenge_start"):
-        start = datetime.strptime(month_row["challenge_start"], "%Y-%m-%d").date()
-        length = int(month_row.get("challenge_length") or 1)
-        days_passed = (date.today() - start).days
-        days_left = max(0, length - days_passed)
-        progress = min(1.0, max(0.0, days_passed / float(length)))
+        try:
+            start = datetime.strptime(month_row["challenge_start"], "%Y-%m-%d").date()
+            length = int(month_row.get("challenge_length") or 1)
+            days_passed = (date.today() - start).days
+            days_left = max(0, length - days_passed)
+            progress = min(1.0, max(0.0, days_passed / float(length)))
 
-        st.progress(progress)
-        st.markdown(f"**{days_left} days left**")
-        if days_left <= 0:
-            st.balloons()
-            st.success("Challenge complete 💪")
+            st.progress(progress)
+            st.markdown(f"**{days_left} days left**")
+            if days_left <= 0:
+                st.balloons()
+                st.success("Challenge complete 💪")
+        except Exception:
+            st.info("Challenge data looks off for this month.")
     else:
         b1, b2, b3 = st.columns(3)
         if b1.button("7 days", use_container_width=True, key="ch7"):
-            update_month(user_id, selected_month, {"challenge_length": 7, "challenge_start": date.today().isoformat()})
-            st.rerun()
+            try:
+                update_month(user_id, selected_month, {"challenge_length": 7, "challenge_start": date.today().isoformat()})
+                st.rerun()
+            except Exception:
+                friendly_db_error()
         if b2.button("14 days", use_container_width=True, key="ch14"):
-            update_month(user_id, selected_month, {"challenge_length": 14, "challenge_start": date.today().isoformat()})
-            st.rerun()
+            try:
+                update_month(user_id, selected_month, {"challenge_length": 14, "challenge_start": date.today().isoformat()})
+                st.rerun()
+            except Exception:
+                friendly_db_error()
         if b3.button("30 days", use_container_width=True, key="ch30"):
-            update_month(user_id, selected_month, {"challenge_length": 30, "challenge_start": date.today().isoformat()})
-            st.rerun()
+            try:
+                update_month(user_id, selected_month, {"challenge_length": 30, "challenge_start": date.today().isoformat()})
+                st.rerun()
+            except Exception:
+                friendly_db_error()
 
 with tab_history:
     st.markdown("### Monthly History")
     rows = monthly_history(user_id)
 
-    # Month picker is the ONLY navigation (as requested)
     months = [r["month"] for r in rows] if rows else []
     if current_month not in months:
         months = [current_month] + months
 
     if not months:
-        st.info("No history yet.")
+        st.info("This is your first month here. Set a budget and log expenses above.")
     else:
         try:
             idx = months.index(selected_month)
@@ -736,8 +796,9 @@ with tab_settings:
             new_md = dict(md) if isinstance(md, dict) else {}
             new_md["theme"] = theme_choice
             sb.auth.update_user({"data": new_md})
-        except Exception as e:
-            st.error(f"Could not update theme: {e}")
+            st.toast("Theme updated", icon="✅")
+        except Exception:
+            friendly_db_error()
         st.rerun()
 
     st.divider()
