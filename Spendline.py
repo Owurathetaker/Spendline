@@ -9,10 +9,14 @@ from supabase import create_client, Client
 
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
-# Mobile-first fix (no Prev/Next month buttons):
-#   - Sidebar can be hidden on mobile.
-#   - Add "Quick Actions" on the main page (Budget / Expense / Assets)
-#   - Month switching happens ONLY in Monthly History (as requested).
+# Mobile-first:
+#   - Main-page "Start here" actions (Budget / Expense / Assets)
+#   - Sidebar still works on desktop, but mobile doesn't depend on it
+# Month switching:
+#   - NO Prev/Next buttons
+#   - Month selection ONLY in Monthly History (dropdown)
+# Fix:
+#   - Green button text visibility (set to white)
 # =========================================================
 
 APP_NAME = "Spendline v0.1"
@@ -109,16 +113,21 @@ div[data-testid="stMetricValue"] * {{
 
 div[data-testid="stButton"] button {{
   background: var(--primary) !important;
-  color: #07210f !important;
+  color: #ffffff !important;                 /* FIX: always visible */
   border-radius: 12px !important;
   border: 1px solid rgba(0,0,0,0.06) !important;
-  font-weight: 750 !important;
+  font-weight: 800 !important;
   padding: .55rem 1.05rem !important;
   transition: background-color .15s ease, transform .03s ease !important;
   box-shadow: 0 10px 22px rgba(34,197,94,.18) !important;
 }}
-div[data-testid="stButton"] button:hover {{ background: var(--primaryHover) !important; }}
-div[data-testid="stButton"] button:active {{ transform: translateY(1px) !important; }}
+div[data-testid="stButton"] button:hover {{
+  background: var(--primaryHover) !important;
+  color: #ffffff !important;
+}}
+div[data-testid="stButton"] button:active {{
+  transform: translateY(1px) !important;
+}}
 
 .small-hint {{
   font-size: 0.92rem;
@@ -199,7 +208,7 @@ def clear_user():
 
 
 # ----------------------------
-# DB operations
+# DB ops
 # ----------------------------
 def ensure_month_row(user_id: str, month: str):
     res = sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute()
@@ -231,7 +240,7 @@ def add_expense(user_id: str, month: str, amount: float, category: str, desc: st
         "month": month,
         "amount": float(amount),
         "category": category,
-        "description": desc or None,
+        "description": (desc or "").strip() or None,
         "occurred_at": datetime.utcnow().isoformat(),
     }
     return sb.table("expenses").insert(row).execute()
@@ -277,7 +286,7 @@ def month_spent_total(user_id: str, mk: str) -> float:
 
 
 # =========================================================
-# AUTH SCREEN (Supabase Auth)
+# AUTH SCREEN
 # =========================================================
 def auth_screen():
     inject_theme("Light")
@@ -388,12 +397,11 @@ except Exception:
 
 inject_theme(theme)
 
-# Selected month: default current month; switching happens ONLY in History tab
+# Selected month: default current month; switching ONLY in Monthly History
 today = date.today()
 current_month = month_key(today)
 if "selected_month" not in st.session_state:
     st.session_state.selected_month = current_month
-
 selected_month = st.session_state.selected_month
 
 # Load data
@@ -452,10 +460,7 @@ with st.sidebar:
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_sidebar"):
         if exp_amount_s > 0:
-            add_expense(
-                user_id, selected_month, float(exp_amount_s),
-                exp_category_s, exp_desc_s.strip() if exp_desc_s else ""
-            )
+            add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s)
             if exp_category_s in WANTS and month_row.get("challenge_start"):
                 update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
                 st.warning("Challenge reset (wants/other expense logged).")
@@ -479,25 +484,38 @@ with st.sidebar:
 
 
 # =========================================================
-# MAIN (mobile-first Quick Actions)
+# MAIN (mobile-first)
 # =========================================================
 st.title("💰 Spendline")
 st.caption("Set budget → log expenses → stack assets. Then check your numbers.")
 
-# Mobile hint (quick + direct)
 st.markdown(
-    "<div class='small-hint'>On phone: use <strong>Quick Actions</strong> below. "
+    "<div class='small-hint'>On phone: use <strong>Start here</strong> below. "
     "The sidebar menu can be easy to miss.</div>",
     unsafe_allow_html=True,
 )
 
-# Current month label (no prev/next buttons)
 st.write(f"**Month:** {selected_month}")
 
-st.markdown("### ⚡ Quick Actions")
-qa1, qa2, qa3 = st.tabs(["📊 Budget", "💸 Expense", "💪 Assets"])
+# Decide which action should appear first (tabs can't be auto-selected, so reorder)
+budget_val = float(month_row.get("budget", 0.0))
+no_expenses = len(expenses) == 0
 
-with qa1:
+if budget_val <= 0:
+    tab_order = ["📊 Budget", "💸 Expense", "💪 Assets"]
+elif no_expenses:
+    tab_order = ["💸 Expense", "📊 Budget", "💪 Assets"]
+else:
+    tab_order = ["💸 Expense", "📊 Budget", "💪 Assets"]
+
+st.markdown("### ✅ Start here")
+t1, t2, t3 = st.tabs(tab_order)
+
+# Helpers to map which tab is which
+tabs = {tab_order[0]: t1, tab_order[1]: t2, tab_order[2]: t3}
+
+# ---- Budget tab
+with tabs["📊 Budget"]:
     q1c1, q1c2 = st.columns([0.7, 0.3])
     with q1c1:
         budget_input_m = st.number_input(
@@ -520,17 +538,15 @@ with qa1:
         st.success("Budget saved 🔒")
         st.rerun()
 
-with qa2:
+# ---- Expense tab
+with tabs["💸 Expense"]:
     exp_amount_m = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_main")
     exp_category_m = st.selectbox("Category", CATEGORIES, key="exp_cat_main")
     exp_desc_m = st.text_input("Description (optional)", key="exp_desc_main")
 
     if st.button("Log Expense", use_container_width=True, key="log_exp_main"):
         if exp_amount_m > 0:
-            add_expense(
-                user_id, selected_month, float(exp_amount_m),
-                exp_category_m, exp_desc_m.strip() if exp_desc_m else ""
-            )
+            add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m)
             if exp_category_m in WANTS and month_row.get("challenge_start"):
                 update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
                 st.warning("Challenge reset (wants/other expense logged).")
@@ -539,7 +555,8 @@ with qa2:
         else:
             st.info("Enter an amount above 0.")
 
-with qa3:
+# ---- Assets tab
+with tabs["💪 Assets"]:
     asset_add_m = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_main")
     if st.button("Stack It", use_container_width=True, key="stack_main"):
         if asset_add_m > 0:
@@ -550,18 +567,14 @@ with qa3:
         else:
             st.info("Enter an amount above 0.")
 
-
-# =========================================================
-# Subtle first-time nudges (no big walkthrough)
-# =========================================================
+# Subtle nudges (compact)
 if "onboarding_done" not in st.session_state:
     st.session_state.onboarding_done = False
 
-budget_val = float(month_row.get("budget", 0.0))
 if budget_val <= 0:
-    st.info("Start: set your **monthly budget** in Quick Actions → **Budget**, then press **Save Budget**.")
-elif len(expenses) == 0:
-    st.info("Next: log your first expense in Quick Actions → **Expense** to unlock your breakdown.")
+    st.info("Start: set your **monthly budget** above, then press **Save Budget**.")
+elif no_expenses:
+    st.info("Next: log your first expense above to unlock your breakdown.")
 elif not st.session_state.onboarding_done:
     st.session_state.onboarding_done = True
     st.toast("You’re set. Keep it simple.", icon="✅")
@@ -671,7 +684,6 @@ with tab_history:
     if not months:
         st.info("No history yet.")
     else:
-        # Pick month
         try:
             idx = months.index(selected_month)
         except ValueError:
@@ -682,7 +694,6 @@ with tab_history:
             st.session_state.selected_month = picked
             st.rerun()
 
-        # Table summary
         out = []
         for r in rows:
             mk = r["month"]
@@ -722,7 +733,6 @@ with tab_settings:
 
     if st.button("Apply Theme", use_container_width=True, key="apply_theme"):
         try:
-            # Preserve other metadata (name/country) while updating theme
             new_md = dict(md) if isinstance(md, dict) else {}
             new_md["theme"] = theme_choice
             sb.auth.update_user({"data": new_md})
