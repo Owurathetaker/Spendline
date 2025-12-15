@@ -12,17 +12,21 @@ from supabase import create_client, Client
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
 #
-# Key behaviors:
+# v1.0 (Phase 2.2 + 2.3)
 # - Explicit login required (NO auto session restore)
-# - Mobile-first "Start here" actions
+# - Mobile-first "This month" flow (budget → expense → assets)
 # - Month selection ONLY in Monthly History dropdown (no prev/next)
 # - Delete single expense + delete single asset entry
 # - Reset current month (expenses + asset entries, reset challenge, reset liabilities)
+# - Delete ALL my data button (RPC delete_user_data)
 # - Net worth uses asset_events sum (source of truth)
-# - Resilient Supabase calls with retry + graceful fallback (prevents crashes)
+# - Resilient Supabase calls with retry + graceful fallback
+# - Feedback capture (Settings → Send a note) (requires `feedback` table)
 # - Streamlit buttons use width="stretch"
 #
-# Note: Asset add/delete requires Supabase table `asset_events`
+# Note:
+# - Asset add/delete requires Supabase table `asset_events`
+# - Feedback requires Supabase table `feedback` with RLS insert policy
 # =========================================================
 
 APP_NAME = "Spendline v1.0 (beta)"
@@ -274,7 +278,6 @@ def ensure_month_row(user_id: str, month: str):
         ins = sb_exec(lambda: sb.table("months").insert(insert).execute(), label="ensure_month_row.insert")
         return ins.data[0] if ins.data else insert
     except Exception:
-        # If even month load fails, stop — app can't function without it
         st.error("Connection hiccup while loading your month. Please refresh in a moment.")
         st.stop()
 
@@ -385,12 +388,10 @@ def month_spent_total(user_id: str, mk: str) -> float:
 
 
 def reset_current_month(user_id: str, month: str, keep_budget: bool):
-    sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute(), label="reset.delete_expenses")
-    sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute(), label="reset.delete_assets")
-
-def delete_all_my_data():
-    # Calls the SQL function you created: public.delete_user_data()
-    return sb_exec(lambda: sb.rpc("delete_user_data", {}).execute(), label="delete_user_data")
+    sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute(),
+            label="reset.delete_expenses")
+    sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute(),
+            label="reset.delete_assets")
 
     patch = {
         "challenge_start": None,
@@ -401,7 +402,18 @@ def delete_all_my_data():
     if not keep_budget:
         patch["budget"] = 0
 
-    sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute(), label="reset.month_patch")
+    sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute(),
+            label="reset.month_patch")
+
+
+def delete_all_my_data():
+    # Calls the SQL function you created: public.delete_user_data()
+    return sb_exec(lambda: sb.rpc("delete_user_data", {}).execute(), label="delete_user_data")
+
+
+def submit_feedback(user_id: str, message: str):
+    row = {"user_id": user_id, "message": message.strip()}
+    return sb_exec(lambda: sb.table("feedback").insert(row).execute(), label="submit_feedback")
 
 
 # =========================================================
@@ -621,17 +633,21 @@ with st.sidebar:
 st.title("💰 Spendline")
 st.caption("Set budget → log expenses → stack assets. Then check your numbers.")
 
-st.markdown(
-    "<div class='small-hint'>On phone: tap <strong>Start here</strong> → Budget / Expense / Assets. "
-    "The sidebar menu can be easy to miss.</div>",
-    unsafe_allow_html=True,
-)
+has_budget = float(month_row.get("budget", 0.0)) > 0
+has_expense = len(expenses) > 0
+
+if not (has_budget and has_expense):
+    st.markdown(
+        "<div class='small-hint'>On phone: use <strong>This month</strong> to set budget, log an expense, or add assets.</div>",
+        unsafe_allow_html=True,
+    )
 
 st.write(f"**Month:** {selected_month}")
 
 budget_val = float(month_row.get("budget", 0.0))
 no_expenses = len(expenses) == 0
 
+# Reorder tabs based on "next action"
 if budget_val <= 0:
     tab_order = ["📊 Budget", "💸 Expense", "💪 Assets"]
 elif no_expenses:
@@ -639,7 +655,9 @@ elif no_expenses:
 else:
     tab_order = ["💸 Expense", "📊 Budget", "💪 Assets"]
 
-st.markdown("### ✅ Start here")
+st.markdown("### This month")
+st.caption("1) Set budget  →  2) Log expense  →  3) Stack assets")
+
 t1, t2, t3 = st.tabs(tab_order)
 tabs = {tab_order[0]: t1, tab_order[1]: t2, tab_order[2]: t3}
 
@@ -712,17 +730,11 @@ with tabs["💪 Assets"]:
                 except Exception:
                     friendly_db_error()
 
-# Nudges
-if "onboarding_done" not in st.session_state:
-    st.session_state.onboarding_done = False
-
-if budget_val <= 0:
-    st.info("Start: set your **monthly budget** above, then press **Save Budget**.")
-elif no_expenses:
-    st.info("Next: log your first expense above to unlock your breakdown.")
-elif not st.session_state.onboarding_done:
-    st.session_state.onboarding_done = True
-    st.toast("You’re set. Keep it simple.", icon="✅")
+# Minimal nudges (no toast)
+if not has_budget:
+    st.info("Set a monthly budget to start.")
+elif not has_expense:
+    st.info("Log your first expense to see your breakdown.")
 
 
 # =========================================================
@@ -959,6 +971,25 @@ with tab_settings:
         st.rerun()
 
     st.divider()
+    st.markdown("### Send a note")
+    msg = st.text_area(
+        "What’s missing or annoying?",
+        key="feedback_msg",
+        height=120,
+        placeholder="Short and direct is perfect."
+    )
+    if st.button("Send", width="stretch", key="send_feedback_btn"):
+        if not msg.strip():
+            st.warning("Write a quick note first.")
+        else:
+            try:
+                submit_feedback(user_id, msg)
+                st.success("Sent. Thank you.")
+                st.session_state["feedback_msg"] = ""
+            except Exception:
+                friendly_db_error()
+
+    st.divider()
     st.markdown("### Reset data")
     keep_budget = st.checkbox("Keep my budget for this month", value=True, key="keep_budget_reset")
     confirm = st.checkbox(
@@ -981,6 +1012,28 @@ with tab_settings:
                 friendly_db_error()
 
     st.divider()
+    st.markdown("### Delete my data")
+    st.caption("This deletes your Spendline data (months, expenses, asset entries). Your login account remains.")
+
+    confirm_del = st.text_input("Type DELETE to confirm", value="", key="confirm_delete_text", placeholder="DELETE")
+
+    if st.button("Delete all my data", width="stretch", key="delete_all_data_btn"):
+        if confirm_del.strip().upper() != "DELETE":
+            st.warning("Type DELETE to confirm.")
+        else:
+            try:
+                delete_all_my_data()
+                st.success("All your Spendline data has been deleted.")
+                try:
+                    sb.auth.sign_out()
+                except Exception:
+                    pass
+                clear_user()
+                st.rerun()
+            except Exception:
+                friendly_db_error()
+
+    st.divider()
     if st.button("Log out", width="stretch", key="logout_settings"):
         try:
             sb.auth.sign_out()
@@ -988,33 +1041,5 @@ with tab_settings:
             pass
         clear_user()
         st.rerun()
-    st.divider()
-st.markdown("### Delete my data")
- 
-st.caption("This deletes your Spendline data (months, expenses, asset entries). Your login account remains.")
- 
-confirm_del = st.text_input(
-    "Type DELETE to confirm",
-    value="",
-    key="confirm_delete_text",
-    placeholder="DELETE"
-)
- 
-if st.button("Delete all my data", width="stretch", key="delete_all_data_btn"):
-    if confirm_del.strip().upper() != "DELETE":
-        st.warning("Type DELETE to confirm.")
-    else:
-        try:
-            delete_all_my_data()
-            st.success("All your Spendline data has been deleted.")
-            # Log out to avoid weird cached UI state
-            try:
-                sb.auth.sign_out()
-            except Exception:
-                pass
-            clear_user()
-            st.rerun()
-        except Exception:
-            friendly_db_error()
 
 st.caption(f"{APP_NAME} • quiet wealth in motion.")
