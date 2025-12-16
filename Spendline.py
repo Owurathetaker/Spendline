@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import time
+import zipfile
 from datetime import datetime, date
 from typing import Any, Callable
 
@@ -12,7 +14,7 @@ from supabase import create_client, Client
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
 #
-# v1.0 (Phase 2.2 + 2.3)
+# v1.0 (Phase 3.1)
 # - Explicit login required (NO auto session restore)
 # - Mobile-first "This month" flow (budget → expense → assets)
 # - Month selection ONLY in Monthly History dropdown (no prev/next)
@@ -22,6 +24,7 @@ from supabase import create_client, Client
 # - Net worth uses asset_events sum (source of truth)
 # - Resilient Supabase calls with retry + graceful fallback
 # - Feedback capture (Settings → Send a note) (requires `feedback` table)
+# - EXPORT ALL DATA (Settings → Export my data) as ZIP
 # - Streamlit buttons use width="stretch"
 #
 # Note:
@@ -261,8 +264,10 @@ def clear_user():
 # ----------------------------
 def ensure_month_row(user_id: str, month: str):
     try:
-        res = sb_exec(lambda: sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute(),
-                      label="ensure_month_row.select")
+        res = sb_exec(
+            lambda: sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute(),
+            label="ensure_month_row.select",
+        )
         if res.data:
             return res.data[0]
         insert = {
@@ -369,7 +374,10 @@ def add_asset_event(user_id: str, month: str, amount: float, note: str | None):
 
 
 def delete_asset_event(asset_event_id: str):
-    return sb_exec(lambda: sb.table("asset_events").delete().eq("id", asset_event_id).execute(), label="delete_asset_event")
+    return sb_exec(
+        lambda: sb.table("asset_events").delete().eq("id", asset_event_id).execute(),
+        label="delete_asset_event",
+    )
 
 
 def sum_spent(expenses: list[dict]) -> float:
@@ -388,10 +396,14 @@ def month_spent_total(user_id: str, mk: str) -> float:
 
 
 def reset_current_month(user_id: str, month: str, keep_budget: bool):
-    sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute(),
-            label="reset.delete_expenses")
-    sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute(),
-            label="reset.delete_assets")
+    sb_exec(
+        lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute(),
+        label="reset.delete_expenses",
+    )
+    sb_exec(
+        lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute(),
+        label="reset.delete_assets",
+    )
 
     patch = {
         "challenge_start": None,
@@ -402,8 +414,10 @@ def reset_current_month(user_id: str, month: str, keep_budget: bool):
     if not keep_budget:
         patch["budget"] = 0
 
-    sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute(),
-            label="reset.month_patch")
+    sb_exec(
+        lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute(),
+        label="reset.month_patch",
+    )
 
 
 def delete_all_my_data():
@@ -414,6 +428,74 @@ def delete_all_my_data():
 def submit_feedback(user_id: str, message: str):
     row = {"user_id": user_id, "message": message.strip()}
     return sb_exec(lambda: sb.table("feedback").insert(row).execute(), label="submit_feedback")
+
+
+# ---------- Phase 3.1 Export helpers ----------
+def export_fetch_months_all(user_id: str) -> list[dict]:
+    res = sb_exec(
+        lambda: sb.table("months").select("*").eq("user_id", user_id).order("month", desc=False).execute(),
+        label="export.months",
+    )
+    return res.data or []
+
+
+def export_fetch_expenses_all(user_id: str) -> list[dict]:
+    res = sb_exec(
+        lambda: sb.table("expenses").select("*").eq("user_id", user_id).order("occurred_at", desc=False).execute(),
+        label="export.expenses",
+    )
+    return res.data or []
+
+
+def export_fetch_asset_events_all(user_id: str) -> tuple[list[dict], bool]:
+    """Returns (rows, available)."""
+    try:
+        res = sb_exec(
+            lambda: sb.table("asset_events").select("*").eq("user_id", user_id).order("created_at", desc=False).execute(),
+            label="export.asset_events",
+        )
+        return (res.data or []), True
+    except Exception:
+        return [], False
+
+
+def to_csv_bytes(rows: list[dict]) -> bytes:
+    df = pd.DataFrame(rows)
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def build_export_zip(user_id: str) -> tuple[bytes, list[str]]:
+    """
+    Creates a ZIP with:
+      - months.csv
+      - expenses.csv
+      - asset_events.csv (if table exists)
+    Returns (zip_bytes, included_filenames)
+    """
+    months_rows = export_fetch_months_all(user_id)
+    expenses_rows = export_fetch_expenses_all(user_id)
+    asset_rows, asset_available = export_fetch_asset_events_all(user_id)
+
+    buf = io.BytesIO()
+    included: list[str] = []
+
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("months.csv", to_csv_bytes(months_rows))
+        included.append("months.csv")
+
+        z.writestr("expenses.csv", to_csv_bytes(expenses_rows))
+        included.append("expenses.csv")
+
+        if asset_available:
+            z.writestr("asset_events.csv", to_csv_bytes(asset_rows))
+            included.append("asset_events.csv")
+
+        # Small meta file (helps you debug exports later)
+        meta = f"exported_at_utc,{datetime.utcnow().isoformat()}\nuser_id,{user_id}\n"
+        z.writestr("export_meta.csv", meta.encode("utf-8"))
+        included.append("export_meta.csv")
+
+    return buf.getvalue(), included
 
 
 # =========================================================
@@ -970,6 +1052,40 @@ with tab_settings:
             friendly_db_error()
         st.rerun()
 
+    # ---------------- Phase 3.1 Export ----------------
+    st.divider()
+    st.markdown("### Export my data")
+    st.caption("Downloads a ZIP with months, expenses, and assets (if available).")
+
+    if "export_zip_bytes" not in st.session_state:
+        st.session_state.export_zip_bytes = None
+        st.session_state.export_zip_name = None
+        st.session_state.export_files = None
+
+    if st.button("Prepare export (ZIP)", width="stretch", key="prepare_export_zip"):
+        try:
+            zip_bytes, included = build_export_zip(user_id)
+            st.session_state.export_zip_bytes = zip_bytes
+            st.session_state.export_zip_name = f"spendline_export_{user_id[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}Z.zip"
+            st.session_state.export_files = included
+            st.success("Export ready. Download below.")
+        except Exception:
+            st.error("Couldn’t prepare the export right now. Please try again.")
+
+    if st.session_state.export_zip_bytes:
+        st.download_button(
+            "Download export ZIP",
+            data=st.session_state.export_zip_bytes,
+            file_name=st.session_state.export_zip_name or "spendline_export.zip",
+            mime="application/zip",
+            width="stretch",
+            key="download_export_zip",
+        )
+        files = st.session_state.export_files or []
+        if files:
+            st.caption("Included: " + ", ".join(files))
+
+    # ---------------- Feedback ----------------
     st.divider()
     st.markdown("### Send a note")
     msg = st.text_area(
@@ -987,8 +1103,9 @@ with tab_settings:
                 st.success("Sent. Thank you.")
                 st.session_state["feedback_msg"] = ""
             except Exception:
-                friendly_db_error()
+                st.error("Couldn’t send your note (table/policy missing or connection hiccup).")
 
+    # ---------------- Reset ----------------
     st.divider()
     st.markdown("### Reset data")
     keep_budget = st.checkbox("Keep my budget for this month", value=True, key="keep_budget_reset")
@@ -1011,6 +1128,7 @@ with tab_settings:
             except Exception:
                 friendly_db_error()
 
+    # ---------------- Delete all data ----------------
     st.divider()
     st.markdown("### Delete my data")
     st.caption("This deletes your Spendline data (months, expenses, asset entries). Your login account remains.")
