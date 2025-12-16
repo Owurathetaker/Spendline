@@ -6,6 +6,7 @@ import zipfile
 from datetime import datetime, date
 from typing import Any, Callable
 
+import httpx
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -14,22 +15,19 @@ from supabase import create_client, Client
 # =========================================================
 # Spendline — Streamlit + Supabase (Auth + Postgres + RLS)
 #
-# v1.0 (Phase 3.1)
+# v1.0 (Phase 3.2)
 # - Explicit login required (NO auto session restore)
 # - Mobile-first "This month" flow (budget → expense → assets)
 # - Month selection ONLY in Monthly History dropdown (no prev/next)
 # - Delete single expense + delete single asset entry
 # - Reset current month (expenses + asset entries, reset challenge, reset liabilities)
 # - Delete ALL my data button (RPC delete_user_data)
+# - Export all data ZIP (months.csv, expenses.csv, asset_events.csv if available)
+# - TRUE account deletion via Edge Function (delete-account)
 # - Net worth uses asset_events sum (source of truth)
 # - Resilient Supabase calls with retry + graceful fallback
 # - Feedback capture (Settings → Send a note) (requires `feedback` table)
-# - EXPORT ALL DATA (Settings → Export my data) as ZIP
 # - Streamlit buttons use width="stretch"
-#
-# Note:
-# - Asset add/delete requires Supabase table `asset_events`
-# - Feedback requires Supabase table `feedback` with RLS insert policy
 # =========================================================
 
 APP_NAME = "Spendline v1.0 (beta)"
@@ -200,10 +198,6 @@ def apply_db_auth(access_token: str | None) -> None:
 # Resilient Supabase executor
 # ----------------------------
 def sb_exec(call: Callable[[], Any], label: str = "request", retries: int = 2, delay: float = 0.6):
-    """
-    Execute a Supabase call with small retries to survive transient httpx ReadErrors
-    (Streamlit Cloud ↔ Supabase hiccups).
-    """
     last_err: Exception | None = None
     for i in range(retries + 1):
         try:
@@ -312,7 +306,6 @@ def monthly_history(user_id: str):
         return []
 
 
-# --- Expenses
 def fetch_expenses(user_id: str, month: str):
     try:
         res = sb_exec(
@@ -347,7 +340,6 @@ def delete_expense_row(expense_id: str):
     return sb_exec(lambda: sb.table("expenses").delete().eq("id", expense_id).execute(), label="delete_expense")
 
 
-# --- Asset events (requires table)
 def fetch_asset_events(user_id: str, month: str):
     res = sb_exec(
         lambda: sb.table("asset_events")
@@ -421,7 +413,6 @@ def reset_current_month(user_id: str, month: str, keep_budget: bool):
 
 
 def delete_all_my_data():
-    # Calls the SQL function you created: public.delete_user_data()
     return sb_exec(lambda: sb.rpc("delete_user_data", {}).execute(), label="delete_user_data")
 
 
@@ -448,7 +439,6 @@ def export_fetch_expenses_all(user_id: str) -> list[dict]:
 
 
 def export_fetch_asset_events_all(user_id: str) -> tuple[list[dict], bool]:
-    """Returns (rows, available)."""
     try:
         res = sb_exec(
             lambda: sb.table("asset_events").select("*").eq("user_id", user_id).order("created_at", desc=False).execute(),
@@ -465,13 +455,6 @@ def to_csv_bytes(rows: list[dict]) -> bytes:
 
 
 def build_export_zip(user_id: str) -> tuple[bytes, list[str]]:
-    """
-    Creates a ZIP with:
-      - months.csv
-      - expenses.csv
-      - asset_events.csv (if table exists)
-    Returns (zip_bytes, included_filenames)
-    """
     months_rows = export_fetch_months_all(user_id)
     expenses_rows = export_fetch_expenses_all(user_id)
     asset_rows, asset_available = export_fetch_asset_events_all(user_id)
@@ -490,12 +473,26 @@ def build_export_zip(user_id: str) -> tuple[bytes, list[str]]:
             z.writestr("asset_events.csv", to_csv_bytes(asset_rows))
             included.append("asset_events.csv")
 
-        # Small meta file (helps you debug exports later)
         meta = f"exported_at_utc,{datetime.utcnow().isoformat()}\nuser_id,{user_id}\n"
         z.writestr("export_meta.csv", meta.encode("utf-8"))
         included.append("export_meta.csv")
 
     return buf.getvalue(), included
+
+
+# ---------- Phase 3.2 Delete Account (Edge Function) ----------
+def call_delete_account_edge() -> httpx.Response:
+    base = st.secrets.get("SUPABASE_URL", "").rstrip("/")
+    if not base:
+        raise RuntimeError("Missing SUPABASE_URL")
+    url = f"{base}/functions/v1/delete-account"
+
+    token = st.session_state.get("sb_access_token")
+    if not token:
+        raise RuntimeError("Missing access token")
+
+    headers = {"Authorization": f"Bearer {token}"}
+    return httpx.post(url, headers=headers, timeout=20.0)
 
 
 # =========================================================
@@ -588,7 +585,6 @@ if not get_user():
 user = get_user()
 user_id = user.id
 
-# Theme from user metadata
 theme = "Light"
 md = {}
 try:
@@ -729,7 +725,6 @@ st.write(f"**Month:** {selected_month}")
 budget_val = float(month_row.get("budget", 0.0))
 no_expenses = len(expenses) == 0
 
-# Reorder tabs based on "next action"
 if budget_val <= 0:
     tab_order = ["📊 Budget", "💸 Expense", "💪 Assets"]
 elif no_expenses:
@@ -812,7 +807,6 @@ with tabs["💪 Assets"]:
                 except Exception:
                     friendly_db_error()
 
-# Minimal nudges (no toast)
 if not has_budget:
     st.info("Set a monthly budget to start.")
 elif not has_expense:
@@ -820,10 +814,9 @@ elif not has_expense:
 
 
 # =========================================================
-# Dashboard (assets sourced from asset_events)
+# Dashboard
 # =========================================================
 total_spent = sum_spent(expenses)
-
 if not asset_events_error:
     assets_total = float(sum(float(a.get("amount", 0.0)) for a in asset_events))
 else:
@@ -832,7 +825,6 @@ else:
 remaining = float(month_row.get("budget", 0.0)) - total_spent
 net_worth = assets_total - float(month_row.get("liabilities", 0.0))
 
-# Keep months.assets synced if asset_events exist (prevents stale net worth)
 if (not asset_events_error) and abs(float(month_row.get("assets", 0.0)) - assets_total) > 0.0001:
     try:
         update_month(user_id, selected_month, {"assets": assets_total})
@@ -1052,7 +1044,7 @@ with tab_settings:
             friendly_db_error()
         st.rerun()
 
-    # ---------------- Phase 3.1 Export ----------------
+    # Export
     st.divider()
     st.markdown("### Export my data")
     st.caption("Downloads a ZIP with months, expenses, and assets (if available).")
@@ -1085,7 +1077,7 @@ with tab_settings:
         if files:
             st.caption("Included: " + ", ".join(files))
 
-    # ---------------- Feedback ----------------
+    # Feedback
     st.divider()
     st.markdown("### Send a note")
     msg = st.text_area(
@@ -1105,7 +1097,7 @@ with tab_settings:
             except Exception:
                 st.error("Couldn’t send your note (table/policy missing or connection hiccup).")
 
-    # ---------------- Reset ----------------
+    # Reset
     st.divider()
     st.markdown("### Reset data")
     keep_budget = st.checkbox("Keep my budget for this month", value=True, key="keep_budget_reset")
@@ -1128,7 +1120,7 @@ with tab_settings:
             except Exception:
                 friendly_db_error()
 
-    # ---------------- Delete all data ----------------
+    # Delete data
     st.divider()
     st.markdown("### Delete my data")
     st.caption("This deletes your Spendline data (months, expenses, asset entries). Your login account remains.")
@@ -1150,6 +1142,37 @@ with tab_settings:
                 st.rerun()
             except Exception:
                 friendly_db_error()
+
+    # TRUE account deletion
+    st.divider()
+    st.markdown("### Delete my account")
+    st.caption("This permanently deletes your account + all data. This cannot be undone.")
+
+    confirm_acc = st.text_input(
+        "Type DELETE MY ACCOUNT to confirm",
+        value="",
+        key="confirm_delete_account",
+        placeholder="DELETE MY ACCOUNT",
+    )
+
+    if st.button("Delete my account permanently", width="stretch", key="delete_account_btn"):
+        if confirm_acc.strip().upper() != "DELETE MY ACCOUNT":
+            st.warning("Type DELETE MY ACCOUNT to confirm.")
+        else:
+            try:
+                resp = call_delete_account_edge()
+                if resp.status_code == 200:
+                    st.success("Account deleted.")
+                    try:
+                        sb.auth.sign_out()
+                    except Exception:
+                        pass
+                    clear_user()
+                    st.rerun()
+                else:
+                    st.error(f"Delete failed ({resp.status_code}). {resp.text}")
+            except Exception:
+                st.error("Couldn’t delete your account right now. Please try again.")
 
     st.divider()
     if st.button("Log out", width="stretch", key="logout_settings"):
