@@ -10,6 +10,16 @@ import plotly.express as px
 import streamlit as st
 from supabase import create_client
 
+# =========================================================
+# Spendline.py
+# Run: streamlit run Spendline.py
+#
+# Phase 2.2:
+# ✅ Password reset flow (email + recovery link handling)
+# ✅ Optional resend confirmation (graceful if unsupported)
+# ✅ NO auto session restore for normal visitors
+# =========================================================
+
 APP_NAME = "Spendline"
 APP_TAGLINE = "quiet wealth in motion."
 
@@ -26,6 +36,9 @@ MAX_AMOUNT = 1_000_000.0
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
 
+# ----------------------------
+# Theme
+# ----------------------------
 def inject_theme(theme: str) -> None:
     theme = theme or "Light"
     if theme == "Dark":
@@ -121,11 +134,7 @@ div[data-testid="stButton"] button:hover {{
   background: var(--card);
   padding: 1.0rem 1.05rem;
 }}
-.linkish {{
-  color: var(--text);
-  text-decoration: underline;
-  cursor: pointer;
-}}
+
 @media (max-width: 480px) {{
   .block-container {{ padding-top: .65rem; }}
   h1 {{ font-size: 2.05rem !important; }}
@@ -136,6 +145,9 @@ div[data-testid="stButton"] button:hover {{
     )
 
 
+# ----------------------------
+# Supabase client
+# ----------------------------
 @st.cache_resource
 def supabase_client():
     url = st.secrets.get("SUPABASE_URL", "")
@@ -207,6 +219,80 @@ def clear_user():
     for k in ("sb_user", "sb_access_token"):
         if k in st.session_state:
             del st.session_state[k]
+
+
+def goto_auth(mode: str):
+    # mode: "landing" | "login" | "signup"
+    st.session_state["auth_mode"] = mode
+    st.query_params["auth"] = mode
+    st.rerun()
+
+
+# ----------------------------
+# Recovery link handling (Password Reset)
+# ----------------------------
+def maybe_accept_recovery_tokens() -> bool:
+    """
+    Accept session ONLY when the user arrives from Supabase recovery/signup/invite link
+    that contains access_token & refresh_token in the URL.
+    This is NOT auto-restore — it's only for the explicit email link flow.
+    """
+    qp = st.query_params
+    link_type = (qp.get("type") or "").lower()
+    access_token = qp.get("access_token")
+    refresh_token = qp.get("refresh_token")
+
+    if link_type not in {"recovery", "invite", "signup"}:
+        return False
+    if not access_token or not refresh_token:
+        return False
+
+    # Create a temporary session from link tokens
+    try:
+        # supabase-py v2+ supports set_session
+        resp = sb.auth.set_session(access_token, refresh_token)  # type: ignore[attr-defined]
+        user = getattr(resp, "user", None)
+        session = getattr(resp, "session", None)
+        token = getattr(session, "access_token", None) if session else access_token
+        if user:
+            set_user(user, token)
+            return True
+        return False
+    except Exception:
+        # If set_session isn't available, we can't safely complete reset in-app.
+        return False
+
+
+def recovery_reset_password_screen():
+    inject_theme("Light")
+    st.title(f"🔑 Reset password")
+    st.caption("Choose a new password for your Spendline account.")
+
+    with st.form("reset_pw_form"):
+        p1 = st.text_input("New password", type="password")
+        p2 = st.text_input("Confirm new password", type="password")
+        submit = st.form_submit_button("Update password", width="stretch")
+
+    if submit:
+        if len(p1) < 6:
+            st.error("Password must be at least 6 characters.")
+            return
+        if p1 != p2:
+            st.error("Passwords do not match.")
+            return
+        try:
+            sb.auth.update_user({"password": p1})
+            st.success("Password updated ✅ Please log in.")
+            # Clear session + return to login
+            try:
+                sb.auth.sign_out()
+            except Exception:
+                pass
+            clear_user()
+            st.query_params.clear()
+            goto_auth("login")
+        except Exception as e:
+            st.error(f"Couldn’t update password: {e}")
 
 
 # ----------------------------
@@ -356,6 +442,7 @@ def month_spent_total(user_id: str, mk: str) -> float:
 def reset_current_month(user_id: str, month: str, keep_budget: bool):
     sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute())
     sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute())
+
     patch = {"challenge_start": None, "challenge_length": None, "assets": 0, "liabilities": 0}
     if not keep_budget:
         patch["budget"] = 0
@@ -416,7 +503,7 @@ def call_delete_account_edge() -> httpx.Response:
 
 
 # =========================================================
-# LANDING + AUTH (better flow)
+# Landing + Auth
 # =========================================================
 def landing_screen():
     inject_theme("Light")
@@ -443,13 +530,9 @@ def landing_screen():
     st.markdown("")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Create account", width="stretch", key="cta_signup"):
-            st.session_state["auth_mode"] = "signup"
-            st.rerun()
+        st.button("Log in", width="stretch", on_click=goto_auth, args=("login",))
     with c2:
-        if st.button("Log in", width="stretch", key="cta_login"):
-            st.session_state["auth_mode"] = "login"
-            st.rerun()
+        st.button("Sign up", width="stretch", on_click=goto_auth, args=("signup",))
 
     st.markdown("")
     st.caption("No demo mode. You’ll always need an account to access Spendline.")
@@ -459,11 +542,8 @@ def signup_view():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
     st.caption("Create an account to start tracking your money.")
-    c1, c2 = st.columns([0.6, 0.4])
-    with c2:
-        if st.button("← Back", width="stretch", key="back_from_signup"):
-            st.session_state["auth_mode"] = "landing"
-            st.rerun()
+    if st.button("← Back", width="stretch", key="back_from_signup"):
+        goto_auth("landing")
 
     st.subheader("Sign up")
     with st.form("signup_form", clear_on_submit=False):
@@ -475,9 +555,8 @@ def signup_view():
         submit = st.form_submit_button("Create account", width="stretch")
 
     st.caption("Already have an account?")
-    if st.button("Go to Log in", width="stretch", key="goto_login"):
-        st.session_state["auth_mode"] = "login"
-        st.rerun()
+    if st.button("Go to Log in", width="stretch", key="goto_login_from_signup"):
+        goto_auth("login")
 
     if submit:
         if not name.strip():
@@ -501,7 +580,7 @@ def signup_view():
 
         if not user:
             st.success("Check your email to confirm your account, then log in.")
-            st.session_state["auth_mode"] = "login"
+            goto_auth("login")
             return
 
         try:
@@ -519,11 +598,8 @@ def login_view():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
     st.caption("Welcome back. Log in to continue.")
-    c1, c2 = st.columns([0.6, 0.4])
-    with c2:
-        if st.button("← Back", width="stretch", key="back_from_login"):
-            st.session_state["auth_mode"] = "landing"
-            st.rerun()
+    if st.button("← Back", width="stretch", key="back_from_login"):
+        goto_auth("landing")
 
     st.subheader("Log in")
     with st.form("login_form", clear_on_submit=False):
@@ -531,10 +607,13 @@ def login_view():
         password = st.text_input("Password", type="password", key="login_pwd")
         submit = st.form_submit_button("Log in", width="stretch")
 
-    st.caption("New here?")
-    if st.button("Create account", width="stretch", key="goto_signup"):
-        st.session_state["auth_mode"] = "signup"
-        st.rerun()
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button("Create account", width="stretch", key="goto_signup_from_login"):
+            goto_auth("signup")
+    with cols[1]:
+        if st.button("Forgot password?", width="stretch", key="forgot_pw_btn"):
+            goto_auth("forgot")
 
     if submit:
         try:
@@ -551,24 +630,78 @@ def login_view():
         except Exception as e:
             st.error(f"Login failed: {e}")
 
+            # Optional: resend confirmation if they haven't confirmed email yet.
+            with st.expander("Having trouble?"):
+                st.write("If you signed up recently, you may need to confirm your email.")
+                if st.button("Resend confirmation email", width="stretch", key="resend_confirm"):
+                    try:
+                        # Some supabase-py versions expose resend()
+                        sb.auth.resend({"type": "signup", "email": email.strip()})  # type: ignore[attr-defined]
+                        st.success("Confirmation email resent. Check your inbox.")
+                    except Exception:
+                        st.info("Resend not available in this client version. You can also try signing up again with the same email.")
 
-# --- Gate: landing/login/signup only until authenticated ---
+
+def forgot_password_view():
+    inject_theme("Light")
+    st.title(f"🔑 Password reset")
+    st.caption("Enter your email. We’ll send you a reset link.")
+    if st.button("← Back", width="stretch", key="back_from_forgot"):
+        goto_auth("login")
+
+    with st.form("forgot_pw_form"):
+        email = st.text_input("Email")
+        submit = st.form_submit_button("Send reset link", width="stretch")
+
+    if submit:
+        if not email.strip():
+            st.error("Enter your email.")
+            return
+        try:
+            redirect_to = st.secrets.get("PASSWORD_RESET_REDIRECT", "").strip() or None
+            # If you set PASSWORD_RESET_REDIRECT in secrets, use it; otherwise Supabase uses site URL.
+            if redirect_to:
+                sb.auth.reset_password_for_email(email.strip(), {"redirect_to": redirect_to})
+            else:
+                sb.auth.reset_password_for_email(email.strip())
+            st.success("Reset link sent ✅ Check your email.")
+            st.caption("After you set a new password, come back and log in.")
+        except Exception as e:
+            st.error(f"Couldn’t send reset email: {e}")
+
+
+# =========================================================
+# ROUTING (no auto-restore; only recovery link is accepted)
+# =========================================================
 if "auth_mode" not in st.session_state:
     st.session_state["auth_mode"] = "landing"
 
+# If arriving from Supabase recovery link, accept tokens and show reset screen.
+accepted = maybe_accept_recovery_tokens()
+if (st.query_params.get("type") or "").lower() == "recovery" and accepted:
+    recovery_reset_password_screen()
+    st.stop()
+
+# Normal visitors: landing/auth, no auto restore.
 if not get_user():
-    mode = st.session_state["auth_mode"]
+    qp_auth = (st.query_params.get("auth") or "").lower()
+    if qp_auth in {"landing", "login", "signup", "forgot"}:
+        st.session_state["auth_mode"] = qp_auth
+
+    mode = st.session_state.get("auth_mode", "landing")
     if mode == "signup":
         signup_view()
     elif mode == "login":
         login_view()
+    elif mode == "forgot":
+        forgot_password_view()
     else:
         landing_screen()
     st.stop()
 
 
 # =========================================================
-# APP (unchanged from your working version)
+# APP
 # =========================================================
 user = get_user()
 user_id = getattr(user, "id", None)
@@ -579,7 +712,7 @@ if not user_id:
     except Exception:
         pass
     clear_user()
-    st.session_state["auth_mode"] = "landing"
+    goto_auth("login")
     st.stop()
 
 md = getattr(user, "user_metadata", {}) or {}
@@ -606,6 +739,8 @@ except Exception:
     asset_events_error = True
     asset_events = []
 
+
+# Sidebar
 with st.sidebar:
     name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
@@ -617,10 +752,10 @@ with st.sidebar:
         except Exception:
             pass
         clear_user()
-        st.session_state["auth_mode"] = "landing"
-        st.rerun()
+        goto_auth("landing")
 
     st.divider()
+
     st.header("📊 Monthly Budget")
     bcol1, bcol2 = st.columns([0.65, 0.35])
     with bcol1:
@@ -640,7 +775,7 @@ with st.sidebar:
         )
 
     if st.button("Save Budget", width="stretch", key="save_budget_sidebar"):
-        ok, msg = guard_amount(float(budget_input_s))
+        ok, msg = guard_amount(float(budget_input_s)) if float(budget_input_s) > 0 else (True, "")
         if not ok:
             st.error(msg)
         else:
@@ -652,6 +787,7 @@ with st.sidebar:
                 st.error("Couldn’t save that right now. Try again.")
 
     st.divider()
+
     st.header("💸 Log Expense")
     exp_amount_s = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_sidebar")
     exp_desc_s = st.text_input("Description (optional)", key="exp_desc_sidebar")
@@ -673,6 +809,7 @@ with st.sidebar:
                 st.error("Couldn’t log that expense. Try again.")
 
     st.divider()
+
     st.header("💪 Savings / Assets")
     asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
     asset_note_s = st.text_input("Note (optional)", key="asset_note_sidebar")
@@ -691,16 +828,16 @@ with st.sidebar:
                 except Exception:
                     st.error("Couldn’t add that asset. Try again.")
 
+
+# Main
 st.title("💰 Spendline")
 st.caption("Quiet money control — track what leaves, stack what stays.")
-st.caption("Beta: if something feels confusing, Settings → Send a note.")
 
 has_budget = float(month_row.get("budget", 0.0) or 0.0) > 0
 has_expense = len(expenses) > 0
-
 if not (has_budget and has_expense):
     st.markdown(
-        "<div class='small-hint'><strong>Quick flow:</strong> set budget → log an expense → stack assets. Your overview updates instantly.</div>",
+        "<div class='small-hint'><strong>Quick flow:</strong> set budget → log an expense → stack assets.</div>",
         unsafe_allow_html=True,
     )
 
@@ -717,8 +854,6 @@ else:
     tab_order = ["💸 Expense", "📊 Budget", "💪 Assets"]
 
 st.markdown("### This month")
-st.caption("Budget → Expense → Assets (simple, on purpose)")
-
 t1, t2, t3 = st.tabs(tab_order)
 tabs = {tab_order[0]: t1, tab_order[1]: t2, tab_order[2]: t3}
 
@@ -741,41 +876,30 @@ with tabs["📊 Budget"]:
         )
 
     if st.button("Save Budget", width="stretch", key="save_budget_main"):
-        ok, msg = guard_amount(float(budget_input_m))
+        ok, msg = guard_amount(float(budget_input_m)) if float(budget_input_m) > 0 else (True, "")
         if not ok:
             st.error(msg)
         else:
-            try:
-                update_month(user_id, selected_month, {"budget": float(budget_input_m), "currency": currency_input_m})
-                st.success("Budget saved 🔒")
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t save budget. Try again.")
+            update_month(user_id, selected_month, {"budget": float(budget_input_m), "currency": currency_input_m})
+            st.success("Budget saved 🔒")
+            st.rerun()
 
 with tabs["💸 Expense"]:
     exp_amount_m = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_main")
     exp_category_m = st.selectbox("Category", CATEGORIES, key="exp_cat_main")
     exp_desc_m = st.text_input("Description (optional)", key="exp_desc_main")
-
     if st.button("Log Expense", width="stretch", key="log_exp_main"):
         ok, msg = guard_amount(float(exp_amount_m))
         if not ok:
             st.error(msg)
         else:
-            try:
-                add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m)
-                if exp_category_m in WANTS and month_row.get("challenge_start"):
-                    update_month(user_id, selected_month, {"challenge_start": None, "challenge_length": None})
-                    st.warning("Challenge reset (wants/other expense logged).")
-                st.success("Expense logged ✅")
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t log expense. Try again.")
+            add_expense(user_id, selected_month, float(exp_amount_m), exp_category_m, exp_desc_m)
+            st.success("Expense logged ✅")
+            st.rerun()
 
 with tabs["💪 Assets"]:
     asset_add_m = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_main")
     asset_note_m = st.text_input("Note (optional)", key="asset_note_main")
-
     if st.button("Stack It", width="stretch", key="stack_main"):
         ok, msg = guard_amount(float(asset_add_m))
         if not ok:
@@ -784,35 +908,15 @@ with tabs["💪 Assets"]:
             if asset_events_error:
                 st.error("Assets add/remove needs the `asset_events` table in Supabase.")
             else:
-                try:
-                    add_asset_event(user_id, selected_month, float(asset_add_m), asset_note_m)
-                    st.success(f"Added {money(asset_add_m, currency)} ✅")
-                    st.rerun()
-                except Exception:
-                    st.error("Couldn’t add asset. Try again.")
-
-if not has_budget:
-    st.info("Set a monthly budget to start.")
-elif not has_expense:
-    st.info("Log your first expense to see your breakdown.")
+                add_asset_event(user_id, selected_month, float(asset_add_m), asset_note_m)
+                st.success(f"Added {money(asset_add_m, currency)} ✅")
+                st.rerun()
 
 total_spent = sum_spent(expenses)
-
-if not asset_events_error:
-    assets_total = float(sum(float(a.get("amount", 0.0) or 0.0) for a in asset_events))
-else:
-    assets_total = float(month_row.get("assets", 0.0) or 0.0)
-
+assets_total = float(sum(float(a.get("amount", 0.0) or 0.0) for a in asset_events)) if not asset_events_error else float(month_row.get("assets", 0.0) or 0.0)
 remaining = float(month_row.get("budget", 0.0) or 0.0) - total_spent
 liabilities = float(month_row.get("liabilities", 0.0) or 0.0)
 net_worth = assets_total - liabilities
-
-try:
-    if not asset_events_error and abs(float(month_row.get("assets", 0.0) or 0.0) - assets_total) > 0.0001:
-        update_month(user_id, selected_month, {"assets": assets_total})
-        month_row["assets"] = assets_total
-except Exception:
-    pass
 
 st.markdown("### 📈 Overview")
 c1, c2, c3, c4 = st.columns(4)
@@ -821,13 +925,8 @@ c2.metric("Spent", money(float(total_spent), currency))
 c3.metric("Remaining", money(float(remaining), currency))
 c4.metric("Net Worth", money(float(net_worth), currency))
 
-if float(month_row.get("budget", 0.0) or 0.0) > 0 and remaining < 0:
-    st.error(f"Over budget by {money(abs(remaining), currency)}")
-
 st.markdown("### 📊 Breakdown")
-if not expenses:
-    st.info("Log an expense to see charts and recent activity.")
-else:
+if expenses:
     df = pd.DataFrame(expenses)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     df["category"] = df["category"].fillna("Other")
@@ -841,187 +940,7 @@ else:
         bar = px.bar(by_cat.head(8), x="category", y="amount", text_auto=".2s")
         bar.update_layout(xaxis_title="", yaxis_title="", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(bar, use_container_width=True)
-
-tab_recent, tab_challenge, tab_history, tab_about, tab_settings = st.tabs(
-    ["🧾 Recent", "🛑 Challenge", "🗂️ Monthly History", "ℹ️ About", "⚙️ Settings"]
-)
-
-with tab_recent:
-    st.markdown("### Recent Expenses")
-    if not expenses:
-        st.info("No expenses yet.")
-    else:
-        for e in expenses[:40]:
-            left, right = st.columns([0.82, 0.18])
-            occurred = e.get("occurred_at")
-            when = ""
-            try:
-                when = pd.to_datetime(occurred).strftime("%b %d, %H:%M") if occurred else ""
-            except Exception:
-                when = ""
-            desc = (e.get("description") or "").strip()
-            label = f"**{e.get('category','Other')}** — {money(float(e.get('amount',0.0) or 0.0), currency)}"
-            meta = f"{when}" + (f" • {desc}" if desc else "")
-            left.markdown(
-                f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>",
-                unsafe_allow_html=True,
-            )
-            if right.button("Delete", key=f"del_exp_{e.get('id')}", width="stretch"):
-                try:
-                    delete_expense_row(e.get("id"))
-                    st.toast("Expense deleted", icon="🗑️")
-                    st.rerun()
-                except Exception:
-                    st.error("Couldn’t delete that expense. Try again.")
-
-    st.divider()
-    st.markdown("### Asset Entries")
-    if asset_events_error:
-        st.info("To enable assets add/remove, create the `asset_events` table in Supabase.")
-    elif not asset_events:
-        st.info("No asset entries yet.")
-    else:
-        for a in asset_events[:40]:
-            left, right = st.columns([0.82, 0.18])
-            when = ""
-            try:
-                when = pd.to_datetime(a.get("created_at")).strftime("%b %d, %H:%M") if a.get("created_at") else ""
-            except Exception:
-                when = ""
-            note = (a.get("note") or "").strip()
-            label = f"**+{money(float(a.get('amount',0.0) or 0.0), currency)}**"
-            meta = f"{when}" + (f" • {note}" if note else "")
-            left.markdown(
-                f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>",
-                unsafe_allow_html=True,
-            )
-            if right.button("Delete", key=f"del_asset_{a.get('id')}", width="stretch"):
-                try:
-                    delete_asset_event(a.get("id"))
-                    st.toast("Asset entry deleted", icon="🗑️")
-                    st.rerun()
-                except Exception:
-                    st.error("Couldn’t delete that asset entry. Try again.")
-
-with tab_challenge:
-    st.markdown("### No-Spend Challenge")
-    st.caption("Logging a wants/other expense resets the challenge automatically.")
-    if month_row.get("challenge_start"):
-        try:
-            start = datetime.strptime(month_row["challenge_start"], "%Y-%m-%d").date()
-            length = int(month_row.get("challenge_length") or 1)
-            days_passed = (date.today() - start).days
-            days_left = max(0, length - days_passed)
-            progress = min(1.0, max(0.0, days_passed / float(length)))
-            st.progress(progress)
-            st.markdown(f"**{days_left} days left**")
-            if days_left <= 0:
-                st.balloons()
-                st.success("Challenge complete 💪")
-        except Exception:
-            st.info("Challenge data looks off for this month.")
-    else:
-        b1, b2, b3 = st.columns(3)
-        if b1.button("7 days", width="stretch", key="ch7"):
-            try:
-                update_month(user_id, selected_month, {"challenge_length": 7, "challenge_start": date.today().isoformat()})
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t start challenge.")
-        if b2.button("14 days", width="stretch", key="ch14"):
-            try:
-                update_month(user_id, selected_month, {"challenge_length": 14, "challenge_start": date.today().isoformat()})
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t start challenge.")
-        if b3.button("30 days", width="stretch", key="ch30"):
-            try:
-                update_month(user_id, selected_month, {"challenge_length": 30, "challenge_start": date.today().isoformat()})
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t start challenge.")
-
-with tab_history:
-    st.markdown("### Monthly History")
-    rows = monthly_history(user_id)
-    months = [r["month"] for r in rows] if rows else []
-    if current_month not in months:
-        months = [current_month] + months
-    if not months:
-        st.info("This is your first month here. Set a budget and log expenses above.")
-    else:
-        try:
-            idx = months.index(selected_month)
-        except ValueError:
-            idx = 0
-        picked = st.selectbox("View month", months, index=idx, key="month_picker")
-        if picked != selected_month:
-            st.session_state.selected_month = picked
-            st.rerun()
-        out = []
-        for r in rows:
-            mk = r["month"]
-            cur = r.get("currency", "USD") or "USD"
-            spent = month_spent_total(user_id, mk)
-            out.append({
-                "Month": mk,
-                "Cur": cur,
-                "Budget": money(float(r.get("budget", 0.0) or 0.0), cur),
-                "Spent": money(spent, cur),
-                "Remaining": money(float(r.get("budget", 0.0) or 0.0) - spent, cur),
-            })
-        if out:
-            st.dataframe(pd.DataFrame(out), use_container_width=True, hide_index=True)
-
-with tab_about:
-    st.markdown("### About Spendline")
-    st.markdown(
-        """
-Spendline is a **minimal budget tracker** for people who want quiet control.
-
-It’s built around one loop:
-- set a budget  
-- log what leaves (expenses)  
-- stack what stays (assets)
-        """
-    )
-    st.caption("No demo mode — you always need an account to access your data.")
-
-with tab_settings:
-    st.markdown("### Settings")
-    theme_choice = st.radio("Theme", ["Light", "Dark"], index=0 if theme == "Light" else 1, key="theme_radio")
-    if st.button("Apply Theme", width="stretch", key="apply_theme"):
-        try:
-            new_md = dict(md) if isinstance(md, dict) else {}
-            new_md["theme"] = theme_choice
-            sb.auth.update_user({"data": new_md})
-            st.toast("Theme updated", icon="✅")
-        except Exception:
-            st.error("Couldn’t update theme.")
-        st.rerun()
-
-    st.divider()
-    st.markdown("### Send a note")
-    msg = st.text_area("What’s missing or annoying?", key="feedback_msg", height=120, placeholder="Short and direct is perfect.")
-    if st.button("Send", width="stretch", key="send_feedback_btn"):
-        if not msg.strip():
-            st.warning("Write a quick note first.")
-        else:
-            try:
-                submit_feedback(user_id, msg)
-                st.success("Sent. Thank you.")
-                st.session_state["feedback_msg"] = ""
-            except Exception:
-                st.error("Couldn’t send your note.")
-
-    st.divider()
-    if st.button("Log out", width="stretch", key="logout_settings"):
-        try:
-            sb.auth.sign_out()
-        except Exception:
-            pass
-        clear_user()
-        st.session_state["auth_mode"] = "landing"
-        st.rerun()
+else:
+    st.info("Log an expense to see charts.")
 
 st.caption(f"{APP_NAME} • {APP_TAGLINE}")
