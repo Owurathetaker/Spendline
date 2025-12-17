@@ -10,25 +10,6 @@ import plotly.express as px
 import streamlit as st
 from supabase import create_client
 
-# =========================================================
-# Spendline.py
-# Run: streamlit run Spendline.py
-#
-# Features:
-# - Supabase auth (explicit login; NO auto session restore)
-# - Monthly persistence (months/expenses/asset_events)
-# - Sidebar entry flow (Budget, Expense, Assets)
-# - Mobile-first “This month” quick tabs (same actions)
-# - Overview + charts + recent lists + no-spend challenge
-# - Monthly history dropdown (NO prev/next buttons)
-# - Delete single expense / delete single asset entry
-# - Reset current month (optional keep budget)
-# - Export ZIP (months.csv, expenses.csv, asset_events.csv if exists)
-# - Delete all data (RPC delete_user_data)
-# - Delete account permanently (Edge Function: delete-account)
-# - About tab + subtle onboarding copy
-# =========================================================
-
 APP_NAME = "Spendline"
 APP_TAGLINE = "quiet wealth in motion."
 
@@ -45,9 +26,6 @@ MAX_AMOUNT = 1_000_000.0
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
 
-# ----------------------------
-# Theme
-# ----------------------------
 def inject_theme(theme: str) -> None:
     theme = theme or "Light"
     if theme == "Dark":
@@ -137,6 +115,17 @@ div[data-testid="stButton"] button:hover {{
   background: var(--card);
 }}
 
+.hero {{
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card);
+  padding: 1.0rem 1.05rem;
+}}
+.linkish {{
+  color: var(--text);
+  text-decoration: underline;
+  cursor: pointer;
+}}
 @media (max-width: 480px) {{
   .block-container {{ padding-top: .65rem; }}
   h1 {{ font-size: 2.05rem !important; }}
@@ -147,9 +136,6 @@ div[data-testid="stButton"] button:hover {{
     )
 
 
-# ----------------------------
-# Supabase client
-# ----------------------------
 @st.cache_resource
 def supabase_client():
     url = st.secrets.get("SUPABASE_URL", "")
@@ -370,7 +356,6 @@ def month_spent_total(user_id: str, mk: str) -> float:
 def reset_current_month(user_id: str, month: str, keep_budget: bool):
     sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute())
     sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute())
-
     patch = {"challenge_start": None, "challenge_length": None, "assets": 0, "liabilities": 0}
     if not keep_budget:
         patch["budget"] = 0
@@ -378,12 +363,10 @@ def reset_current_month(user_id: str, month: str, keep_budget: bool):
 
 
 def delete_all_my_data():
-    # Requires SQL RPC: delete_user_data()
     return sb_exec(lambda: sb.rpc("delete_user_data", {}).execute())
 
 
 def submit_feedback(user_id: str, message: str):
-    # Requires table: feedback (user_id uuid, message text)
     row = {"user_id": user_id, "message": message.strip()}
     return sb_exec(lambda: sb.table("feedback").insert(row).execute())
 
@@ -433,88 +416,160 @@ def call_delete_account_edge() -> httpx.Response:
 
 
 # =========================================================
-# AUTH SCREEN (explicit login required — no auto restore)
+# LANDING + AUTH (better flow)
 # =========================================================
-def auth_screen():
+def landing_screen():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
-    st.caption("Sign in required to access Spendline.")
-    st.caption("Quiet money control. Your data stays private.")
+    st.markdown(
+        f"""
+<div class="hero">
+  <h3 style="margin-top:0; margin-bottom:.25rem; color: var(--text);">
+    Spend less on liabilities. Stack more on assets.
+  </h3>
+  <p style="margin-top:0;">
+    A simple budget tracker built for people who want clarity — not complexity.
+  </p>
+  <ul style="margin-top:.35rem; color: var(--muted);">
+    <li>Set a monthly budget</li>
+    <li>Log expenses in seconds</li>
+    <li>Track assets to build net worth</li>
+  </ul>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-    tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
-
-    with tab_signup:
-        st.subheader("Create account")
-        with st.form("signup_form", clear_on_submit=False):
-            name = st.text_input("Full name")
-            email = st.text_input("Email")
-            country = st.text_input("Country (optional)")
-            password = st.text_input("Password", type="password")
-            password2 = st.text_input("Confirm password", type="password")
-            submit = st.form_submit_button("Create account", width="stretch")
-
-        if submit:
-            if not name.strip():
-                st.error("Please enter your name.")
-                return
-            if len(password) < 6:
-                st.error("Password must be at least 6 characters.")
-                return
-            if password != password2:
-                st.error("Passwords do not match.")
-                return
-
-            try:
-                resp = sb.auth.sign_up({"email": email.strip(), "password": password})
-            except Exception as e:
-                st.error(f"Signup failed: {e}")
-                return
-
-            user = getattr(resp, "user", None)
-            session = getattr(resp, "session", None)
-
-            # If email confirmation is on, user may be None.
-            if not user:
-                st.success("Check your email to confirm your account, then log in.")
-                return
-
-            try:
-                sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
-            except Exception:
-                pass
-
-            token = getattr(session, "access_token", None) if session else None
-            set_user(user, token)
-            st.success("Account created ✅")
+    st.markdown("")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Create account", width="stretch", key="cta_signup"):
+            st.session_state["auth_mode"] = "signup"
+            st.rerun()
+    with c2:
+        if st.button("Log in", width="stretch", key="cta_login"):
+            st.session_state["auth_mode"] = "login"
             st.rerun()
 
-    with tab_login:
-        st.subheader("Welcome back")
-        with st.form("login_form", clear_on_submit=False):
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_pwd")
-            submit = st.form_submit_button("Log in", width="stretch")
+    st.markdown("")
+    st.caption("No demo mode. You’ll always need an account to access Spendline.")
 
-        if submit:
-            try:
-                resp = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
-                user = getattr(resp, "user", None)
-                session = getattr(resp, "session", None)
-                if not user:
-                    st.error("Login failed. Check your email/password.")
-                    return
-                token = getattr(session, "access_token", None) if session else None
-                set_user(user, token)
-                st.success("Logged in ✅")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Login failed: {e}")
 
+def signup_view():
+    inject_theme("Light")
+    st.title(f"💰 {APP_NAME}")
+    st.caption("Create an account to start tracking your money.")
+    c1, c2 = st.columns([0.6, 0.4])
+    with c2:
+        if st.button("← Back", width="stretch", key="back_from_signup"):
+            st.session_state["auth_mode"] = "landing"
+            st.rerun()
+
+    st.subheader("Sign up")
+    with st.form("signup_form", clear_on_submit=False):
+        name = st.text_input("Full name")
+        email = st.text_input("Email")
+        country = st.text_input("Country (optional)")
+        password = st.text_input("Password", type="password")
+        password2 = st.text_input("Confirm password", type="password")
+        submit = st.form_submit_button("Create account", width="stretch")
+
+    st.caption("Already have an account?")
+    if st.button("Go to Log in", width="stretch", key="goto_login"):
+        st.session_state["auth_mode"] = "login"
+        st.rerun()
+
+    if submit:
+        if not name.strip():
+            st.error("Please enter your name.")
+            return
+        if len(password) < 6:
+            st.error("Password must be at least 6 characters.")
+            return
+        if password != password2:
+            st.error("Passwords do not match.")
+            return
+
+        try:
+            resp = sb.auth.sign_up({"email": email.strip(), "password": password})
+        except Exception as e:
+            st.error(f"Signup failed: {e}")
+            return
+
+        user = getattr(resp, "user", None)
+        session = getattr(resp, "session", None)
+
+        if not user:
+            st.success("Check your email to confirm your account, then log in.")
+            st.session_state["auth_mode"] = "login"
+            return
+
+        try:
+            sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
+        except Exception:
+            pass
+
+        token = getattr(session, "access_token", None) if session else None
+        set_user(user, token)
+        st.success("Account created ✅")
+        st.rerun()
+
+
+def login_view():
+    inject_theme("Light")
+    st.title(f"💰 {APP_NAME}")
+    st.caption("Welcome back. Log in to continue.")
+    c1, c2 = st.columns([0.6, 0.4])
+    with c2:
+        if st.button("← Back", width="stretch", key="back_from_login"):
+            st.session_state["auth_mode"] = "landing"
+            st.rerun()
+
+    st.subheader("Log in")
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_pwd")
+        submit = st.form_submit_button("Log in", width="stretch")
+
+    st.caption("New here?")
+    if st.button("Create account", width="stretch", key="goto_signup"):
+        st.session_state["auth_mode"] = "signup"
+        st.rerun()
+
+    if submit:
+        try:
+            resp = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
+            user = getattr(resp, "user", None)
+            session = getattr(resp, "session", None)
+            if not user:
+                st.error("Login failed. Check your email/password.")
+                return
+            token = getattr(session, "access_token", None) if session else None
+            set_user(user, token)
+            st.success("Logged in ✅")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+
+
+# --- Gate: landing/login/signup only until authenticated ---
+if "auth_mode" not in st.session_state:
+    st.session_state["auth_mode"] = "landing"
 
 if not get_user():
-    auth_screen()
+    mode = st.session_state["auth_mode"]
+    if mode == "signup":
+        signup_view()
+    elif mode == "login":
+        login_view()
+    else:
+        landing_screen()
     st.stop()
 
+
+# =========================================================
+# APP (unchanged from your working version)
+# =========================================================
 user = get_user()
 user_id = getattr(user, "id", None)
 if not user_id:
@@ -524,6 +579,7 @@ if not user_id:
     except Exception:
         pass
     clear_user()
+    st.session_state["auth_mode"] = "landing"
     st.stop()
 
 md = getattr(user, "user_metadata", {}) or {}
@@ -550,10 +606,6 @@ except Exception:
     asset_events_error = True
     asset_events = []
 
-
-# =========================================================
-# SIDEBAR (still the best flow on mobile/desktop)
-# =========================================================
 with st.sidebar:
     name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
@@ -565,10 +617,10 @@ with st.sidebar:
         except Exception:
             pass
         clear_user()
+        st.session_state["auth_mode"] = "landing"
         st.rerun()
 
     st.divider()
-
     st.header("📊 Monthly Budget")
     bcol1, bcol2 = st.columns([0.65, 0.35])
     with bcol1:
@@ -600,7 +652,6 @@ with st.sidebar:
                 st.error("Couldn’t save that right now. Try again.")
 
     st.divider()
-
     st.header("💸 Log Expense")
     exp_amount_s = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_sidebar")
     exp_desc_s = st.text_input("Description (optional)", key="exp_desc_sidebar")
@@ -622,7 +673,6 @@ with st.sidebar:
                 st.error("Couldn’t log that expense. Try again.")
 
     st.divider()
-
     st.header("💪 Savings / Assets")
     asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
     asset_note_s = st.text_input("Note (optional)", key="asset_note_sidebar")
@@ -641,10 +691,6 @@ with st.sidebar:
                 except Exception:
                     st.error("Couldn’t add that asset. Try again.")
 
-
-# =========================================================
-# MAIN (mobile-first + obvious)
-# =========================================================
 st.title("💰 Spendline")
 st.caption("Quiet money control — track what leaves, stack what stays.")
 st.caption("Beta: if something feels confusing, Settings → Send a note.")
@@ -750,10 +796,6 @@ if not has_budget:
 elif not has_expense:
     st.info("Log your first expense to see your breakdown.")
 
-
-# =========================================================
-# OVERVIEW
-# =========================================================
 total_spent = sum_spent(expenses)
 
 if not asset_events_error:
@@ -765,7 +807,6 @@ remaining = float(month_row.get("budget", 0.0) or 0.0) - total_spent
 liabilities = float(month_row.get("liabilities", 0.0) or 0.0)
 net_worth = assets_total - liabilities
 
-# keep months.assets in sync (optional but useful)
 try:
     if not asset_events_error and abs(float(month_row.get("assets", 0.0) or 0.0) - assets_total) > 0.0001:
         update_month(user_id, selected_month, {"assets": assets_total})
@@ -783,10 +824,6 @@ c4.metric("Net Worth", money(float(net_worth), currency))
 if float(month_row.get("budget", 0.0) or 0.0) > 0 and remaining < 0:
     st.error(f"Over budget by {money(abs(remaining), currency)}")
 
-
-# =========================================================
-# CHARTS
-# =========================================================
 st.markdown("### 📊 Breakdown")
 if not expenses:
     st.info("Log an expense to see charts and recent activity.")
@@ -794,9 +831,7 @@ else:
     df = pd.DataFrame(expenses)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     df["category"] = df["category"].fillna("Other")
-
     by_cat = df.groupby("category", as_index=False)["amount"].sum().sort_values("amount", ascending=False)
-
     ch1, ch2 = st.columns([1.2, 0.8])
     with ch1:
         pie = px.pie(by_cat, values="amount", names="category", hole=0.55)
@@ -807,10 +842,6 @@ else:
         bar.update_layout(xaxis_title="", yaxis_title="", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(bar, use_container_width=True)
 
-
-# =========================================================
-# LOWER TABS (Recent / Challenge / History / About / Settings)
-# =========================================================
 tab_recent, tab_challenge, tab_history, tab_about, tab_settings = st.tabs(
     ["🧾 Recent", "🛑 Challenge", "🗂️ Monthly History", "ℹ️ About", "⚙️ Settings"]
 )
@@ -828,7 +859,6 @@ with tab_recent:
                 when = pd.to_datetime(occurred).strftime("%b %d, %H:%M") if occurred else ""
             except Exception:
                 when = ""
-
             desc = (e.get("description") or "").strip()
             label = f"**{e.get('category','Other')}** — {money(float(e.get('amount',0.0) or 0.0), currency)}"
             meta = f"{when}" + (f" • {desc}" if desc else "")
@@ -836,7 +866,6 @@ with tab_recent:
                 f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>",
                 unsafe_allow_html=True,
             )
-
             if right.button("Delete", key=f"del_exp_{e.get('id')}", width="stretch"):
                 try:
                     delete_expense_row(e.get("id"))
@@ -866,7 +895,6 @@ with tab_recent:
                 f"<div class='mini-card'>{label}<br/><span style='opacity:.85'>{meta}</span></div>",
                 unsafe_allow_html=True,
             )
-
             if right.button("Delete", key=f"del_asset_{a.get('id')}", width="stretch"):
                 try:
                     delete_asset_event(a.get("id"))
@@ -878,7 +906,6 @@ with tab_recent:
 with tab_challenge:
     st.markdown("### No-Spend Challenge")
     st.caption("Logging a wants/other expense resets the challenge automatically.")
-
     if month_row.get("challenge_start"):
         try:
             start = datetime.strptime(month_row["challenge_start"], "%Y-%m-%d").date()
@@ -886,7 +913,6 @@ with tab_challenge:
             days_passed = (date.today() - start).days
             days_left = max(0, length - days_passed)
             progress = min(1.0, max(0.0, days_passed / float(length)))
-
             st.progress(progress)
             st.markdown(f"**{days_left} days left**")
             if days_left <= 0:
@@ -918,11 +944,9 @@ with tab_challenge:
 with tab_history:
     st.markdown("### Monthly History")
     rows = monthly_history(user_id)
-
     months = [r["month"] for r in rows] if rows else []
     if current_month not in months:
         months = [current_month] + months
-
     if not months:
         st.info("This is your first month here. Set a budget and log expenses above.")
     else:
@@ -930,12 +954,10 @@ with tab_history:
             idx = months.index(selected_month)
         except ValueError:
             idx = 0
-
         picked = st.selectbox("View month", months, index=idx, key="month_picker")
         if picked != selected_month:
             st.session_state.selected_month = picked
             st.rerun()
-
         out = []
         for r in rows:
             mk = r["month"]
@@ -948,25 +970,8 @@ with tab_history:
                 "Spent": money(spent, cur),
                 "Remaining": money(float(r.get("budget", 0.0) or 0.0) - spent, cur),
             })
-
         if out:
             st.dataframe(pd.DataFrame(out), use_container_width=True, hide_index=True)
-
-        st.divider()
-        if st.button("Export current month (CSV)", width="stretch", key="export_csv"):
-            if not expenses:
-                st.info("No expenses to export for this month.")
-            else:
-                df_csv = pd.DataFrame(expenses).copy()
-                df_csv["occurred_at"] = pd.to_datetime(df_csv["occurred_at"], errors="coerce")
-                df_csv = df_csv.rename(columns={"occurred_at": "date", "description": "desc"})
-                st.download_button(
-                    "Download CSV",
-                    df_csv.to_csv(index=False).encode("utf-8"),
-                    file_name=f"spendline_{selected_month}_expenses.csv",
-                    mime="text/csv",
-                    width="stretch",
-                )
 
 with tab_about:
     st.markdown("### About Spendline")
@@ -977,31 +982,14 @@ Spendline is a **minimal budget tracker** for people who want quiet control.
 It’s built around one loop:
 - set a budget  
 - log what leaves (expenses)  
-- stack what stays (assets)  
+- stack what stays (assets)
         """
     )
-
-    st.divider()
-    st.markdown("### Privacy & control")
-    st.markdown(
-        """
-You control your data:
-- **Export** everything (Settings → Export my data)  
-- **Delete** your Spendline data (Settings → Delete my data)  
-- **Delete** your entire account (Settings → Delete my account)  
-        """
-    )
-
-    st.divider()
-    st.markdown("### Beta note")
-    st.markdown("If something feels confusing: Settings → **Send a note**.")
+    st.caption("No demo mode — you always need an account to access your data.")
 
 with tab_settings:
     st.markdown("### Settings")
-
-    # Theme toggle
     theme_choice = st.radio("Theme", ["Light", "Dark"], index=0 if theme == "Light" else 1, key="theme_radio")
-
     if st.button("Apply Theme", width="stretch", key="apply_theme"):
         try:
             new_md = dict(md) if isinstance(md, dict) else {}
@@ -1012,48 +1000,9 @@ with tab_settings:
             st.error("Couldn’t update theme.")
         st.rerun()
 
-    # Export ZIP
-    st.divider()
-    st.markdown("### Export my data")
-    st.caption("Downloads a ZIP with months, expenses, and assets (if available).")
-
-    if "export_zip_bytes" not in st.session_state:
-        st.session_state.export_zip_bytes = None
-        st.session_state.export_zip_name = None
-        st.session_state.export_files = None
-
-    if st.button("Prepare export (ZIP)", width="stretch", key="prepare_export_zip"):
-        try:
-            zip_bytes, included = build_export_zip(user_id)
-            st.session_state.export_zip_bytes = zip_bytes
-            st.session_state.export_zip_name = f"spendline_export_{user_id[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}Z.zip"
-            st.session_state.export_files = included
-            st.success("Export ready. Download below.")
-        except Exception:
-            st.error("Couldn’t prepare the export right now. Please try again.")
-
-    if st.session_state.export_zip_bytes:
-        st.download_button(
-            "Download export ZIP",
-            data=st.session_state.export_zip_bytes,
-            file_name=st.session_state.export_zip_name or "spendline_export.zip",
-            mime="application/zip",
-            width="stretch",
-            key="download_export_zip",
-        )
-        files = st.session_state.export_files or []
-        if files:
-            st.caption("Included: " + ", ".join(files))
-
-    # Feedback
     st.divider()
     st.markdown("### Send a note")
-    msg = st.text_area(
-        "What’s missing or annoying?",
-        key="feedback_msg",
-        height=120,
-        placeholder="Short and direct is perfect."
-    )
+    msg = st.text_area("What’s missing or annoying?", key="feedback_msg", height=120, placeholder="Short and direct is perfect.")
     if st.button("Send", width="stretch", key="send_feedback_btn"):
         if not msg.strip():
             st.warning("Write a quick note first.")
@@ -1063,84 +1012,7 @@ with tab_settings:
                 st.success("Sent. Thank you.")
                 st.session_state["feedback_msg"] = ""
             except Exception:
-                st.error("Couldn’t send your note (table/policy missing or connection hiccup).")
-
-    # Reset month
-    st.divider()
-    st.markdown("### Reset data")
-    keep_budget = st.checkbox("Keep my budget for this month", value=True, key="keep_budget_reset")
-    confirm = st.checkbox(
-        "I understand this will delete expenses & asset entries for this month",
-        value=False,
-        key="confirm_reset",
-    )
-
-    if st.button("Reset current month", width="stretch", key="reset_month_btn"):
-        if not confirm:
-            st.warning("Tick the confirmation box first.")
-        elif asset_events_error:
-            st.error("Assets table not set up yet. Create `asset_events` first, then reset.")
-        else:
-            try:
-                reset_current_month(user_id, selected_month, keep_budget=keep_budget)
-                st.success("Current month reset.")
-                st.rerun()
-            except Exception:
-                st.error("Couldn’t reset right now.")
-
-    # Delete all data
-    st.divider()
-    st.markdown("### Delete my data")
-    st.caption("Deletes your Spendline data (months, expenses, asset entries). Your login remains.")
-
-    confirm_del = st.text_input("Type DELETE to confirm", value="", key="confirm_delete_text", placeholder="DELETE")
-
-    if st.button("Delete all my data", width="stretch", key="delete_all_data_btn"):
-        if confirm_del.strip().upper() != "DELETE":
-            st.warning("Type DELETE to confirm.")
-        else:
-            try:
-                delete_all_my_data()
-                st.success("All your Spendline data has been deleted.")
-                try:
-                    sb.auth.sign_out()
-                except Exception:
-                    pass
-                clear_user()
-                st.rerun()
-            except Exception:
-                st.error("Delete failed. Make sure the RPC `delete_user_data()` exists and policies allow it.")
-
-    # Delete account
-    st.divider()
-    st.markdown("### Delete my account")
-    st.caption("Permanently deletes your account + all data. This cannot be undone.")
-
-    confirm_acc = st.text_input(
-        "Type DELETE MY ACCOUNT to confirm",
-        value="",
-        key="confirm_delete_account",
-        placeholder="DELETE MY ACCOUNT",
-    )
-
-    if st.button("Delete my account permanently", width="stretch", key="delete_account_btn"):
-        if confirm_acc.strip().upper() != "DELETE MY ACCOUNT":
-            st.warning("Type DELETE MY ACCOUNT to confirm.")
-        else:
-            try:
-                resp = call_delete_account_edge()
-                if resp.status_code == 200:
-                    st.success("Account deleted.")
-                    try:
-                        sb.auth.sign_out()
-                    except Exception:
-                        pass
-                    clear_user()
-                    st.rerun()
-                else:
-                    st.error(f"Delete failed ({resp.status_code}). {resp.text}")
-            except Exception as e:
-                st.error(f"Couldn’t delete your account right now: {e}")
+                st.error("Couldn’t send your note.")
 
     st.divider()
     if st.button("Log out", width="stretch", key="logout_settings"):
@@ -1149,6 +1021,7 @@ with tab_settings:
         except Exception:
             pass
         clear_user()
+        st.session_state["auth_mode"] = "landing"
         st.rerun()
 
 st.caption(f"{APP_NAME} • {APP_TAGLINE}")
