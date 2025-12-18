@@ -4,23 +4,22 @@ import zipfile
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
-import httpx
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import streamlit.components.v1 as components
 from supabase import create_client
+from supabase.lib.client_options import ClientOptions
 
 # =========================================================
 # Spendline.py
 # Run: streamlit run Spendline.py
 #
-# Phase 2.2 FIX:
-# ✅ Password reset links work (handles URL hash fragments)
-# ✅ Supports both token and PKCE code flows
+# FIX: Password reset works by using PKCE flow.
+# - Supabase sends recovery redirect with ?code=... (not #access_token...)
+# - We exchange code -> session, then allow password update.
 #
-# Still:
-# ✅ NO auto session restore for normal visitors
+# Policy:
+# ✅ Explicit login required (no auto restore for casual visitors)
 # =========================================================
 
 APP_NAME = "Spendline"
@@ -30,93 +29,10 @@ CATEGORIES = [
     "Food & Dining", "Transport", "Entertainment", "Shopping",
     "Bills & Utilities", "Health", "Subscriptions", "Other"
 ]
-WANTS = {"Entertainment", "Shopping", "Subscriptions", "Other"}
 CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
 
 MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
-
-
-def hash_to_query_bridge():
-    components.html(
-        """
-<script>
-(function() {
-  function needsRewrite() {
-    const hash = window.location.hash || "";
-    if (!hash || hash.length < 2) return false;
-    const h = hash.startsWith("#") ? hash.substring(1) : hash;
-    return (h.includes("access_token=") || h.includes("refresh_token=") || h.includes("type=") || h.includes("code="));
-  }
-
-  function rewrite() {
-    try {
-      const hash = window.location.hash || "";
-      if (!hash || hash.length < 2) return false;
-      const h = hash.startsWith("#") ? hash.substring(1) : hash;
-
-      if (!h.includes("access_token=") && !h.includes("refresh_token=") && !h.includes("type=") && !h.includes("code=")) return false;
-
-      const url = new URL(window.location.href);
-      const params = new URLSearchParams(url.search);
-      const hashParams = new URLSearchParams(h);
-
-      for (const [k, v] of hashParams.entries()) {
-        if (!params.get(k)) params.set(k, v);
-      }
-
-      url.search = params.toString();
-      url.hash = "";
-      window.location.replace(url.toString());
-      return true;
-    } catch (e) { return false; }
-  }
-
-  // Auto retry (covers slow hydration + some mobile quirks)
-  if (rewrite()) return;
-  let n = 0;
-  const t = setInterval(() => {
-    n += 1;
-    if (rewrite() || n > 25) clearInterval(t);
-  }, 150);
-
-  // Expose a manual trigger for strict in-app browsers
-  window.__spendlineRewrite = rewrite;
-
-  // If it still needs rewrite after a bit, show a small helper UI
-  setTimeout(() => {
-    if (!needsRewrite()) return;
-    const el = document.createElement("div");
-    el.style.position = "fixed";
-    el.style.left = "50%";
-    el.style.bottom = "18px";
-    el.style.transform = "translateX(-50%)";
-    el.style.zIndex = "99999";
-    el.style.padding = "10px 12px";
-    el.style.borderRadius = "12px";
-    el.style.background = "rgba(15,23,42,0.92)";
-    el.style.color = "white";
-    el.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-    el.style.fontSize = "13px";
-    el.style.boxShadow = "0 10px 30px rgba(0,0,0,0.25)";
-    el.innerHTML = `
-      <div style="display:flex; gap:10px; align-items:center;">
-        <div>Finish password reset:</div>
-        <button id="spendline-continue"
-          style="background:#22c55e;border:none;color:white;padding:8px 10px;border-radius:10px;font-weight:800;cursor:pointer;">
-          Continue
-        </button>
-      </div>`;
-    document.body.appendChild(el);
-    document.getElementById("spendline-continue").onclick = () => {
-      rewrite();
-    };
-  }, 900);
-})();
-</script>
-""",
-        height=0,
-    )
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
@@ -145,10 +61,8 @@ def inject_theme(theme: str) -> None:
         f"""
 <style>
 {vars_css}
-
 .stApp {{ background: var(--bg) !important; }}
 .block-container {{ padding-top: .85rem; padding-bottom: 2rem; max-width: 980px; }}
-
 h1,h2,h3,h4 {{ color: var(--text) !important; letter-spacing:-0.2px; }}
 p, label, .stMarkdown {{ color: var(--muted) !important; }}
 
@@ -163,6 +77,7 @@ input, textarea {{
   background: var(--panel) !important;
   color: var(--text) !important;
 }}
+
 div[data-baseweb="select"] > div {{
   border-radius: 10px !important;
   border: 1px solid var(--border) !important;
@@ -176,6 +91,7 @@ div[data-testid="metric-container"] {{
   border-radius: var(--radius) !important;
   padding: .9rem !important;
 }}
+
 div[data-testid="stMetricLabel"] * {{ color: var(--muted) !important; }}
 div[data-testid="stMetricValue"] * {{
   color: var(--text) !important;
@@ -197,32 +113,11 @@ div[data-testid="stButton"] button:hover {{
   color: #ffffff !important;
 }}
 
-.small-hint {{
-  font-size: 0.92rem;
-  color: var(--muted);
-  background: rgba(100,116,139,0.08);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.6rem 0.75rem;
-}}
-
-.mini-card {{
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: .65rem .75rem;
-  background: var(--card);
-}}
-
 .hero {{
   border: 1px solid var(--border);
   border-radius: 18px;
   background: var(--card);
   padding: 1.0rem 1.05rem;
-}}
-
-@media (max-width: 480px) {{
-  .block-container {{ padding-top: .65rem; }}
-  h1 {{ font-size: 2.05rem !important; }}
 }}
 </style>
 """,
@@ -231,7 +126,7 @@ div[data-testid="stButton"] button:hover {{
 
 
 # ----------------------------
-# Supabase client
+# Supabase client (PKCE)
 # ----------------------------
 @st.cache_resource
 def supabase_client():
@@ -240,7 +135,10 @@ def supabase_client():
     if not url or not key:
         st.error("Missing SUPABASE_URL / SUPABASE_ANON_KEY in Streamlit secrets.")
         st.stop()
-    return create_client(url, key)
+
+    # PKCE flow is the important bit for recovery links to become ?code=...
+    opts = ClientOptions(flow_type="pkce")
+    return create_client(url, key, options=opts)
 
 
 sb = supabase_client()
@@ -270,10 +168,9 @@ def sb_exec(call: Callable[[], Any], retries: int = 2, delay: float = 0.6):
                 raise last_err
 
 
-def month_key(d: date) -> str:
-    return d.strftime("%Y-%m")
-
-
+# ----------------------------
+# Helpers
+# ----------------------------
 def sym(code: str) -> str:
     return CURRENCIES.get(code, "$")
 
@@ -290,6 +187,13 @@ def guard_amount(x: float) -> tuple[bool, str]:
     return True, ""
 
 
+def month_key(d: date) -> str:
+    return d.strftime("%Y-%m")
+
+
+# ----------------------------
+# Session helpers (explicit login)
+# ----------------------------
 def get_user():
     return st.session_state.get("sb_user")
 
@@ -302,100 +206,40 @@ def set_user(user, access_token: Optional[str]):
 
 def clear_user():
     for k in ("sb_user", "sb_access_token"):
-        if k in st.session_state:
-            del st.session_state[k]
+        st.session_state.pop(k, None)
 
 
 def goto_auth(mode: str):
-    # mode: landing | login | signup | forgot
     st.session_state["auth_mode"] = mode
     st.query_params["auth"] = mode
     st.rerun()
 
 
-# =========================================================
-# PASSWORD RESET FIX:
-# Convert URL fragment (#access_token=...) into query params so Streamlit can read it.
-# =========================================================
-def hash_to_query_bridge():
-    # Runs in the browser; if a Supabase recovery link arrives with a hash fragment,
-    # we rewrite the URL to use query params.
-    components.html(
-        """
-<script>
-(function() {
-  try {
-    const hash = window.location.hash || "";
-    if (!hash || hash.length < 2) return;
+# ----------------------------
+# PKCE recovery handler
+# ----------------------------
+def maybe_accept_pkce_code_session() -> bool:
+    code = st.query_params.get("code")
+    link_type = (st.query_params.get("type") or st.query_params.get("auth") or "").lower()
 
-    // Example: #access_token=...&refresh_token=...&type=recovery
-    const h = hash.startsWith("#") ? hash.substring(1) : hash;
-    if (!h.includes("access_token=") && !h.includes("type=") && !h.includes("refresh_token=")) return;
+    # Supabase recovery redirects commonly include type=recovery or you can route via ?auth=recovery
+    if not code:
+        return False
+    if link_type not in {"recovery"} and st.query_params.get("auth") != "recovery":
+        # still allow exchange if code exists; but keep conservative
+        pass
 
-    const current = new URL(window.location.href);
-    const params = new URLSearchParams(current.search);
-
-    const hashParams = new URLSearchParams(h);
-    for (const [k, v] of hashParams.entries()) {
-      // don't overwrite existing params unless missing
-      if (!params.get(k)) params.set(k, v);
-    }
-
-    // Clear hash by rebuilding URL without it
-    current.search = params.toString();
-    current.hash = "";
-    window.location.replace(current.toString());
-  } catch (e) {}
-})();
-</script>
-""",
-        height=0,
-    )
-
-
-hash_to_query_bridge()
-
-
-# =========================================================
-# Recovery link handling
-# =========================================================
-def maybe_accept_recovery_session() -> bool:
-    """
-    Accept a session ONLY when user arrives from an explicit auth link:
-    - Token flow: ?type=recovery&access_token=...&refresh_token=...
-    - PKCE flow: ?code=...
-    """
-    qp = st.query_params
-    link_type = (qp.get("type") or "").lower()
-    access_token = qp.get("access_token")
-    refresh_token = qp.get("refresh_token")
-    code = qp.get("code")
-
-    # PKCE flow
-    if code:
-        try:
-            resp = sb.auth.exchange_code_for_session(code)  # type: ignore[attr-defined]
-            user = getattr(resp, "user", None)
-            session = getattr(resp, "session", None)
-            token = getattr(session, "access_token", None) if session else None
-            if user:
-                set_user(user, token)
-                return True
-        except Exception:
-            return False
-
-    # Token flow (implicit)
-    if link_type in {"recovery", "invite", "signup"} and access_token and refresh_token:
-        try:
-            resp = sb.auth.set_session(access_token, refresh_token)  # type: ignore[attr-defined]
-            user = getattr(resp, "user", None)
-            session = getattr(resp, "session", None)
-            token = getattr(session, "access_token", None) if session else access_token
-            if user:
-                set_user(user, token)
-                return True
-        except Exception:
-            return False
+    try:
+        # Per Supabase Python docs, exchange_code_for_session expects {"auth_code": "..."}
+        resp = sb.auth.exchange_code_for_session({"auth_code": code})
+        user = getattr(resp, "user", None)
+        session = getattr(resp, "session", None)
+        token = getattr(session, "access_token", None) if session else None
+        if user:
+            set_user(user, token)
+            return True
+    except Exception:
+        return False
 
     return False
 
@@ -403,7 +247,7 @@ def maybe_accept_recovery_session() -> bool:
 def recovery_reset_password_screen():
     inject_theme("Light")
     st.title("🔑 Reset password")
-    st.caption("Choose a new password for your Spendline account.")
+    st.caption("Set a new password for your Spendline account.")
 
     with st.form("reset_pw_form"):
         p1 = st.text_input("New password", type="password")
@@ -432,183 +276,19 @@ def recovery_reset_password_screen():
 
 
 # ----------------------------
-# DB ops
+# Auth UI
 # ----------------------------
-def ensure_month_row(user_id: str, month: str) -> dict:
-    res = sb_exec(lambda: sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute())
-    if res.data:
-        return res.data[0]
-    insert = {
-        "user_id": user_id,
-        "month": month,
-        "currency": "USD",
-        "budget": 0,
-        "assets": 0,
-        "liabilities": 0,
-        "challenge_start": None,
-        "challenge_length": None,
-    }
-    ins = sb_exec(lambda: sb.table("months").insert(insert).execute())
-    return ins.data[0] if ins.data else insert
-
-
-def update_month(user_id: str, month: str, patch: dict):
-    patch = dict(patch)
-    patch["updated_at"] = datetime.utcnow().isoformat()
-    return sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute())
-
-
-def monthly_history(user_id: str) -> list[dict]:
-    try:
-        res = sb_exec(
-            lambda: sb.table("months")
-            .select("month,currency,budget,assets,liabilities")
-            .eq("user_id", user_id)
-            .order("month", desc=True)
-            .execute()
-        )
-        return res.data or []
-    except Exception:
-        return []
-
-
-def fetch_expenses(user_id: str, month: str) -> list[dict]:
-    try:
-        res = sb_exec(
-            lambda: sb.table("expenses")
-            .select("id,occurred_at,amount,category,description")
-            .eq("user_id", user_id)
-            .eq("month", month)
-            .order("occurred_at", desc=True)
-            .limit(500)
-            .execute()
-        )
-        rows = res.data or []
-        out = []
-        for r in rows:
-            try:
-                amount = float(r.get("amount") or 0.0)
-            except Exception:
-                amount = 0.0
-            out.append(
-                {
-                    "id": r.get("id"),
-                    "occurred_at": r.get("occurred_at"),
-                    "amount": amount,
-                    "category": r.get("category") or "Other",
-                    "description": r.get("description") or "",
-                }
-            )
-        return out
-    except Exception:
-        return []
-
-
-def add_expense(user_id: str, month: str, amount: float, category: str, desc: str | None):
-    row = {
-        "user_id": user_id,
-        "month": month,
-        "amount": float(amount),
-        "category": category,
-        "description": (desc or "").strip() or None,
-        "occurred_at": datetime.utcnow().isoformat(),
-    }
-    return sb_exec(lambda: sb.table("expenses").insert(row).execute())
-
-
-def delete_expense_row(expense_id: str):
-    return sb_exec(lambda: sb.table("expenses").delete().eq("id", expense_id).execute())
-
-
-def fetch_asset_events(user_id: str, month: str) -> list[dict]:
-    res = sb_exec(
-        lambda: sb.table("asset_events")
-        .select("id,created_at,amount,note")
-        .eq("user_id", user_id)
-        .eq("month", month)
-        .order("created_at", desc=True)
-        .limit(500)
-        .execute()
-    )
-    rows = res.data or []
-    out = []
-    for r in rows:
-        try:
-            amount = float(r.get("amount") or 0.0)
-        except Exception:
-            amount = 0.0
-        out.append(
-            {
-                "id": r.get("id"),
-                "created_at": r.get("created_at"),
-                "amount": amount,
-                "note": r.get("note") or "",
-            }
-        )
-    return out
-
-
-def add_asset_event(user_id: str, month: str, amount: float, note: str | None):
-    row = {
-        "user_id": user_id,
-        "month": month,
-        "amount": float(amount),
-        "note": (note or "").strip() or None,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    return sb_exec(lambda: sb.table("asset_events").insert(row).execute())
-
-
-def delete_asset_event(asset_event_id: str):
-    return sb_exec(lambda: sb.table("asset_events").delete().eq("id", asset_event_id).execute())
-
-
-def sum_spent(expenses: list[dict]) -> float:
-    return float(sum(float(e.get("amount", 0.0) or 0.0) for e in expenses))
-
-
-def month_spent_total(user_id: str, mk: str) -> float:
-    try:
-        res = sb_exec(lambda: sb.table("expenses").select("amount").eq("user_id", user_id).eq("month", mk).execute())
-        return float(sum(float(r.get("amount") or 0.0) for r in (res.data or [])))
-    except Exception:
-        return 0.0
-
-
-def reset_current_month(user_id: str, month: str, keep_budget: bool):
-    sb_exec(lambda: sb.table("expenses").delete().eq("user_id", user_id).eq("month", month).execute())
-    sb_exec(lambda: sb.table("asset_events").delete().eq("user_id", user_id).eq("month", month).execute())
-    patch = {"challenge_start": None, "challenge_length": None, "assets": 0, "liabilities": 0}
-    if not keep_budget:
-        patch["budget"] = 0
-    sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute())
-
-
-def submit_feedback(user_id: str, message: str):
-    row = {"user_id": user_id, "message": message.strip()}
-    return sb_exec(lambda: sb.table("feedback").insert(row).execute())
-
-
-# =========================================================
-# Landing + Auth
-# =========================================================
 def landing_screen():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
     st.markdown(
-        """
+        f"""
 <div class="hero">
   <h3 style="margin-top:0; margin-bottom:.25rem; color: var(--text);">
     Spend less on liabilities. Stack more on assets.
   </h3>
-  <p style="margin-top:0;">
-    A simple budget tracker built for people who want clarity — not complexity.
-  </p>
-  <ul style="margin-top:.35rem; color: var(--muted);">
-    <li>Set a monthly budget</li>
-    <li>Log expenses in seconds</li>
-    <li>Track assets to build net worth</li>
-  </ul>
+  <p style="margin-top:0;">A simple budget tracker built for clarity — not complexity.</p>
+  <p style="margin-top:.35rem; color: var(--muted);"><b>{APP_TAGLINE}</b></p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -633,13 +313,12 @@ def signup_view():
     with st.form("signup_form", clear_on_submit=False):
         name = st.text_input("Full name")
         email = st.text_input("Email")
-        country = st.text_input("Country (optional)")
+        country = st.text_input("Country (optional)", value="gh")
         password = st.text_input("Password", type="password")
         password2 = st.text_input("Confirm password", type="password")
         submit = st.form_submit_button("Create account", width="stretch")
 
-    st.caption("Already have an account?")
-    if st.button("Go to Log in", width="stretch"):
+    if st.button("Already have an account? Log in", width="stretch"):
         goto_auth("login")
 
     if submit:
@@ -668,7 +347,7 @@ def signup_view():
             return
 
         try:
-            sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light", "onboarded": False}})
+            sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
         except Exception:
             pass
 
@@ -737,25 +416,22 @@ def forgot_password_view():
             else:
                 sb.auth.reset_password_for_email(email.strip())
             st.success("Reset link sent ✅ Check your email.")
-            st.caption("Open the link, set a new password, then log in.")
         except Exception as e:
             st.error(f"Couldn’t send reset email: {e}")
 
 
-# =========================================================
-# ROUTING (explicit only)
-# =========================================================
-if "auth_mode" not in st.session_state:
-    st.session_state["auth_mode"] = "landing"
-
-# If arriving from recovery link, accept session and show reset form
-accepted = maybe_accept_recovery_session()
-if (st.query_params.get("type") or "").lower() == "recovery" and accepted:
+# ----------------------------
+# Routing (recovery first)
+# ----------------------------
+if maybe_accept_pkce_code_session() and (st.query_params.get("auth") == "recovery" or (st.query_params.get("type") or "").lower() == "recovery"):
     recovery_reset_password_screen()
     st.stop()
 
-# Normal visitors: landing/auth only, no auto restore
+# Normal visitors: explicit login required, no auto restore
 if not get_user():
+    if "auth_mode" not in st.session_state:
+        st.session_state["auth_mode"] = "landing"
+
     qp_auth = (st.query_params.get("auth") or "").lower()
     if qp_auth in {"landing", "login", "signup", "forgot"}:
         st.session_state["auth_mode"] = qp_auth
@@ -771,9 +447,8 @@ if not get_user():
         landing_screen()
     st.stop()
 
-
 # =========================================================
-# APP
+# APP (db + UI)
 # =========================================================
 user = get_user()
 user_id = getattr(user, "id", None)
@@ -798,112 +473,137 @@ if "selected_month" not in st.session_state:
     st.session_state.selected_month = current_month
 selected_month = st.session_state.selected_month
 
+
+def ensure_month_row(user_id: str, month: str) -> dict:
+    res = sb_exec(lambda: sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute())
+    if res.data:
+        return res.data[0]
+    insert = {
+        "user_id": user_id,
+        "month": month,
+        "currency": "USD",
+        "budget": 0,
+        "liabilities": 0,
+    }
+    ins = sb_exec(lambda: sb.table("months").insert(insert).execute())
+    return ins.data[0] if ins.data else insert
+
+
+def update_month(user_id: str, month: str, patch: dict):
+    patch = dict(patch)
+    patch["updated_at"] = datetime.utcnow().isoformat()
+    return sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute())
+
+
+def monthly_history(user_id: str) -> list[dict]:
+    res = sb_exec(
+        lambda: sb.table("months")
+        .select("month,currency,budget,liabilities,updated_at")
+        .eq("user_id", user_id)
+        .order("month", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def fetch_expenses(user_id: str, month: str) -> list[dict]:
+    res = sb_exec(
+        lambda: sb.table("expenses")
+        .select("id,occurred_at,amount,category,description")
+        .eq("user_id", user_id)
+        .eq("month", month)
+        .order("occurred_at", desc=True)
+        .limit(500)
+        .execute()
+    )
+    rows = res.data or []
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": r.get("id"),
+                "occurred_at": r.get("occurred_at"),
+                "amount": float(r.get("amount") or 0.0),
+                "category": r.get("category") or "Other",
+                "description": r.get("description") or "",
+            }
+        )
+    return out
+
+
+def add_expense(user_id: str, month: str, amount: float, category: str, desc: Optional[str]):
+    row = {
+        "user_id": user_id,
+        "month": month,
+        "amount": float(amount),
+        "category": category,
+        "description": (desc or "").strip() or None,
+        "occurred_at": datetime.utcnow().isoformat(),
+    }
+    return sb_exec(lambda: sb.table("expenses").insert(row).execute())
+
+
+def delete_expense_row(expense_id: str):
+    return sb_exec(lambda: sb.table("expenses").delete().eq("id", expense_id).execute())
+
+
+def fetch_asset_events(user_id: str, month: str) -> list[dict]:
+    res = sb_exec(
+        lambda: sb.table("asset_events")
+        .select("id,created_at,amount,note")
+        .eq("user_id", user_id)
+        .eq("month", month)
+        .order("created_at", desc=True)
+        .limit(500)
+        .execute()
+    )
+    rows = res.data or []
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": r.get("id"),
+                "created_at": r.get("created_at"),
+                "amount": float(r.get("amount") or 0.0),
+                "note": r.get("note") or "",
+            }
+        )
+    return out
+
+
+def add_asset_event(user_id: str, month: str, amount: float, note: Optional[str]):
+    row = {
+        "user_id": user_id,
+        "month": month,
+        "amount": float(amount),
+        "note": (note or "").strip() or None,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    return sb_exec(lambda: sb.table("asset_events").insert(row).execute())
+
+
+def delete_asset_event(asset_event_id: str):
+    return sb_exec(lambda: sb.table("asset_events").delete().eq("id", asset_event_id).execute())
+
+
+def sum_spent(expenses: list[dict]) -> float:
+    return float(sum(float(e.get("amount") or 0.0) for e in expenses))
+
+
 month_row = ensure_month_row(user_id, selected_month)
-currency = month_row.get("currency", "USD") or "USD"
+currency = month_row.get("currency") or "USD"
 
 expenses = fetch_expenses(user_id, selected_month)
+asset_events = fetch_asset_events(user_id, selected_month)
 
-asset_events_error = False
-asset_events: list[dict] = []
-try:
-    asset_events = fetch_asset_events(user_id, selected_month)
-except Exception:
-    asset_events_error = True
-    asset_events = []
-
-
-# =========================================================
-# Phase 2.3 Onboarding (shows once per user)
-# =========================================================
-def is_onboarded(metadata: dict) -> bool:
-    try:
-        return bool(metadata.get("onboarded", False))
-    except Exception:
-        return False
+total_spent = sum_spent(expenses)
+assets_total = float(sum(float(a.get("amount") or 0.0) for a in asset_events))
+liabilities = float(month_row.get("liabilities") or 0.0)
+budget_val = float(month_row.get("budget") or 0.0)
+remaining = budget_val - total_spent
+net_worth = assets_total - liabilities
 
 
-def set_onboarded_true(metadata: dict):
-    try:
-        new_md = dict(metadata) if isinstance(metadata, dict) else {}
-        new_md["onboarded"] = True
-        sb.auth.update_user({"data": new_md})
-    except Exception:
-        pass
-
-
-st.title("💰 Spendline")
-st.caption("Quiet money control — track what leaves, stack what stays.")
-
-if not is_onboarded(md):
-    st.markdown("<div class='hero'><h3 style='margin:0;color:var(--text)'>Quick setup (60 seconds)</h3>"
-                "<p style='margin:.25rem 0 0'>Do this once, then you’re in.</p></div>", unsafe_allow_html=True)
-
-    step = st.session_state.get("onboarding_step", 1)
-
-    if step == 1:
-        st.markdown("### 1) Set your monthly budget")
-        c1, c2 = st.columns([0.7, 0.3])
-        with c1:
-            bud = st.number_input("Budget", min_value=0.0, step=10.0, value=float(month_row.get("budget", 0.0) or 0.0), key="ob_budget")
-        with c2:
-            cur = st.selectbox("Cur", list(CURRENCIES.keys()),
-                               index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0,
-                               key="ob_cur")
-        if st.button("Save & continue", width="stretch", key="ob_step1"):
-            update_month(user_id, selected_month, {"budget": float(bud), "currency": cur})
-            st.session_state["onboarding_step"] = 2
-            st.rerun()
-
-    elif step == 2:
-        st.markdown("### 2) Log your first expense")
-        amt = st.number_input("Amount", min_value=0.0, step=1.0, key="ob_exp_amt")
-        cat = st.selectbox("Category", CATEGORIES, key="ob_exp_cat")
-        desc = st.text_input("Description (optional)", key="ob_exp_desc")
-        cols = st.columns(2)
-        with cols[0]:
-            if st.button("Back", width="stretch", key="ob_back2"):
-                st.session_state["onboarding_step"] = 1
-                st.rerun()
-        with cols[1]:
-            if st.button("Log & continue", width="stretch", key="ob_step2"):
-                ok, msg = guard_amount(float(amt))
-                if not ok:
-                    st.error(msg)
-                else:
-                    add_expense(user_id, selected_month, float(amt), cat, desc)
-                    st.session_state["onboarding_step"] = 3
-                    st.rerun()
-
-    else:
-        st.markdown("### 3) Add your first asset (optional)")
-        aamt = st.number_input("Amount", min_value=0.0, step=1.0, key="ob_asset_amt")
-        note = st.text_input("Note (optional)", key="ob_asset_note")
-        cols = st.columns(2)
-        with cols[0]:
-            if st.button("Skip", width="stretch", key="ob_skip"):
-                set_onboarded_true(md)
-                st.session_state["onboarding_step"] = 1
-                st.rerun()
-        with cols[1]:
-            if st.button("Add & finish", width="stretch", key="ob_finish"):
-                if asset_events_error:
-                    set_onboarded_true(md)
-                    st.session_state["onboarding_step"] = 1
-                    st.rerun()
-                else:
-                    ok, msg = guard_amount(float(aamt))
-                    if not ok:
-                        st.error(msg)
-                    else:
-                        add_asset_event(user_id, selected_month, float(aamt), note)
-                        set_onboarded_true(md)
-                        st.session_state["onboarding_step"] = 1
-                        st.rerun()
-
-    st.divider()
-
-
-# Sidebar
 with st.sidebar:
     name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
@@ -919,64 +619,60 @@ with st.sidebar:
 
     st.divider()
     st.header("📊 Monthly Budget")
-    bcol1, bcol2 = st.columns([0.65, 0.35])
-    with bcol1:
-        budget_input_s = st.number_input("Budget", min_value=0.0, step=10.0,
-                                         value=float(month_row.get("budget", 0.0) or 0.0), key="budget_sidebar")
-    with bcol2:
-        currency_input_s = st.selectbox("Cur", list(CURRENCIES.keys()),
-                                        index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0,
-                                        key="cur_sidebar")
 
-    if st.button("Save Budget", width="stretch", key="save_budget_sidebar"):
-        update_month(user_id, selected_month, {"budget": float(budget_input_s), "currency": currency_input_s})
+    b1, b2 = st.columns([0.65, 0.35])
+    with b1:
+        budget_input = st.number_input("Budget", min_value=0.0, step=10.0, value=float(budget_val), key="budget_in")
+    with b2:
+        cur_input = st.selectbox(
+            "Cur",
+            list(CURRENCIES.keys()),
+            index=list(CURRENCIES.keys()).index(currency) if currency in CURRENCIES else 0,
+            key="cur_in",
+        )
+
+    if st.button("Save Budget", width="stretch"):
+        update_month(user_id, selected_month, {"budget": float(budget_input), "currency": cur_input})
         st.success("Saved 🔒")
         st.rerun()
 
     st.divider()
     st.header("💸 Log Expense")
-    exp_amount_s = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt_sidebar")
-    exp_desc_s = st.text_input("Description (optional)", key="exp_desc_sidebar")
-    exp_category_s = st.selectbox("Category", CATEGORIES, key="exp_cat_sidebar")
-    if st.button("Log Expense", width="stretch", key="log_exp_sidebar"):
-        ok, msg = guard_amount(float(exp_amount_s))
+    exp_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt")
+    exp_cat = st.selectbox("Category", CATEGORIES, key="exp_cat")
+    exp_desc = st.text_input("Description (optional)", key="exp_desc")
+    if st.button("Log Expense", width="stretch"):
+        ok, msg = guard_amount(float(exp_amt))
         if not ok:
             st.error(msg)
         else:
-            add_expense(user_id, selected_month, float(exp_amount_s), exp_category_s, exp_desc_s)
+            add_expense(user_id, selected_month, float(exp_amt), exp_cat, exp_desc)
             st.success("Logged ✅")
             st.rerun()
 
     st.divider()
-    st.header("💪 Savings / Assets")
-    asset_add_s = st.number_input("Add to assets", min_value=0.0, step=1.0, key="asset_add_sidebar")
-    asset_note_s = st.text_input("Note (optional)", key="asset_note_sidebar")
-    if st.button("Stack It", width="stretch", key="stack_sidebar"):
-        ok, msg = guard_amount(float(asset_add_s))
+    st.header("💪 Assets")
+    a_amt = st.number_input("Add", min_value=0.0, step=1.0, key="a_amt")
+    a_note = st.text_input("Note (optional)", key="a_note")
+    if st.button("Stack It", width="stretch"):
+        ok, msg = guard_amount(float(a_amt))
         if not ok:
             st.error(msg)
         else:
-            if not asset_events_error:
-                add_asset_event(user_id, selected_month, float(asset_add_s), asset_note_s)
-                st.success(f"+{money(asset_add_s, currency)}")
-                st.rerun()
-            else:
-                st.error("Assets table missing (`asset_events`).")
+            add_asset_event(user_id, selected_month, float(a_amt), a_note)
+            st.success(f"+{money(a_amt, currency)}")
+            st.rerun()
 
 
-# Overview + Charts (kept simple)
-total_spent = sum_spent(expenses)
-assets_total = float(sum(float(a.get("amount", 0.0) or 0.0) for a in asset_events)) if not asset_events_error else float(month_row.get("assets", 0.0) or 0.0)
-remaining = float(month_row.get("budget", 0.0) or 0.0) - total_spent
-liabilities = float(month_row.get("liabilities", 0.0) or 0.0)
-net_worth = assets_total - liabilities
+st.title("💰 Spendline")
+st.caption("Quiet money control — track what leaves, stack what stays.")
 
 st.markdown("### 📈 Overview")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Budget", money(float(month_row.get("budget", 0.0) or 0.0), currency))
-c2.metric("Spent", money(float(total_spent), currency))
-c3.metric("Remaining", money(float(remaining), currency))
-c4.metric("Net Worth", money(float(net_worth), currency))
+c1.metric("Budget", money(budget_val, currency))
+c2.metric("Spent", money(total_spent, currency))
+c3.metric("Remaining", money(remaining, currency))
+c4.metric("Net Worth", money(net_worth, currency))
 
 st.markdown("### 📊 Breakdown")
 if expenses:
@@ -984,16 +680,84 @@ if expenses:
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     df["category"] = df["category"].fillna("Other")
     by_cat = df.groupby("category", as_index=False)["amount"].sum().sort_values("amount", ascending=False)
-    ch1, ch2 = st.columns([1.2, 0.8])
-    with ch1:
+
+    left, right = st.columns([1.2, 0.8])
+    with left:
         pie = px.pie(by_cat, values="amount", names="category", hole=0.55)
         pie.update_layout(margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(pie, use_container_width=True)
-    with ch2:
+    with right:
         bar = px.bar(by_cat.head(8), x="category", y="amount", text_auto=".2s")
         bar.update_layout(xaxis_title="", yaxis_title="", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(bar, use_container_width=True)
 else:
     st.info("Log an expense to see charts.")
 
-st.caption(f"{APP_NAME} • {APP_TAGLINE}")
+tab_recent, tab_history, tab_settings = st.tabs(["Recent", "Monthly History", "Settings"])
+
+with tab_recent:
+    st.markdown("### Recent expenses")
+    if not expenses:
+        st.caption("No expenses yet.")
+    else:
+        for e in expenses[:15]:
+            cols = st.columns([0.16, 0.50, 0.22, 0.12])
+            cols[0].caption((e.get("occurred_at") or "")[:10])
+            cols[1].write(f"**{e.get('category','Other')}**  \n{e.get('description','')}")
+            cols[2].write(money(float(e.get("amount") or 0.0), currency))
+            if cols[3].button("🗑️", key=f"del_exp_{e['id']}"):
+                delete_expense_row(e["id"])
+                st.rerun()
+
+    st.markdown("### Recent assets")
+    if not asset_events:
+        st.caption("No assets yet.")
+    else:
+        for a in asset_events[:15]:
+            cols = st.columns([0.16, 0.56, 0.20, 0.08])
+            cols[0].caption((a.get("created_at") or "")[:10])
+            cols[1].write(a.get("note") or "Asset add")
+            cols[2].write(money(float(a.get("amount") or 0.0), currency))
+            if cols[3].button("🗑️", key=f"del_asset_{a['id']}"):
+                delete_asset_event(a["id"])
+                st.rerun()
+
+with tab_history:
+    st.markdown("### Monthly History")
+    rows = monthly_history(user_id)
+    if not rows:
+        st.caption("No history yet.")
+    else:
+        months = [r["month"] for r in rows]
+        pick = st.selectbox(
+            "Select month",
+            months,
+            index=months.index(selected_month) if selected_month in months else 0,
+        )
+        if pick != selected_month:
+            st.session_state.selected_month = pick
+            st.rerun()
+
+        show = []
+        for r in rows[:24]:
+            show.append({
+                "Month": r["month"],
+                "Currency": r.get("currency") or "USD",
+                "Budget": float(r.get("budget") or 0.0),
+                "Liabilities": float(r.get("liabilities") or 0.0),
+            })
+        st.dataframe(pd.DataFrame(show), use_container_width=True)
+
+with tab_settings:
+    st.markdown("### Settings")
+    theme_choice = st.selectbox("Theme", ["Light", "Dark"], index=0 if theme != "Dark" else 1)
+    if st.button("Save theme", width="stretch"):
+        try:
+            sb.auth.update_user({"data": {**(md if isinstance(md, dict) else {}), "theme": theme_choice}})
+        except Exception:
+            pass
+        st.success("Theme saved.")
+        st.rerun()
+
+    st.divider()
+    st.caption(f"{APP_NAME} • {APP_TAGLINE}")
