@@ -14,6 +14,35 @@ from supabase import create_client
 
 import streamlit.components.v1 as components
 
+
+# =========================================================
+# Spendline.py
+# Run: streamlit run Spendline.py
+#
+# Phase 2.2 FIX:
+# ✅ Password reset links work (handles URL hash fragments)
+# ✅ Supports both token and PKCE code flows
+#
+# Phase 2.3:
+# ✅ First-run onboarding (simple 3-step) - shows once per user
+#
+# Still:
+# ✅ NO auto session restore for normal visitors
+# =========================================================
+
+APP_NAME = "Spendline"
+APP_TAGLINE = "quiet wealth in motion."
+
+CATEGORIES = [
+    "Food & Dining", "Transport", "Entertainment", "Shopping",
+    "Bills & Utilities", "Health", "Subscriptions", "Other"
+]
+WANTS = {"Entertainment", "Shopping", "Subscriptions", "Other"}
+CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
+
+MIN_AMOUNT = 0.01
+MAX_AMOUNT = 1_000_000.0
+
 def hash_to_query_bridge():
     components.html(
         """
@@ -47,34 +76,6 @@ def hash_to_query_bridge():
     )
 
 hash_to_query_bridge()
-
-# =========================================================
-# Spendline.py
-# Run: streamlit run Spendline.py
-#
-# Phase 2.2 FIX:
-# ✅ Password reset links work (handles URL hash fragments)
-# ✅ Supports both token and PKCE code flows
-#
-# Phase 2.3:
-# ✅ First-run onboarding (simple 3-step) - shows once per user
-#
-# Still:
-# ✅ NO auto session restore for normal visitors
-# =========================================================
-
-APP_NAME = "Spendline"
-APP_TAGLINE = "quiet wealth in motion."
-
-CATEGORIES = [
-    "Food & Dining", "Transport", "Entertainment", "Shopping",
-    "Bills & Utilities", "Health", "Subscriptions", "Other"
-]
-WANTS = {"Entertainment", "Shopping", "Subscriptions", "Other"}
-CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
-
-MIN_AMOUNT = 0.01
-MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
