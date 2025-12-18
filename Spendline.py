@@ -38,41 +38,85 @@ MAX_AMOUNT = 1_000_000.0
 
 
 def hash_to_query_bridge():
-    # Convert Supabase hash fragment (#access_token=...) into query params (?access_token=...)
-    # so Streamlit can read them.
     components.html(
         """
 <script>
 (function() {
-  try {
+  function needsRewrite() {
     const hash = window.location.hash || "";
-    if (!hash || hash.length < 2) return;
-
+    if (!hash || hash.length < 2) return false;
     const h = hash.startsWith("#") ? hash.substring(1) : hash;
+    return (h.includes("access_token=") || h.includes("refresh_token=") || h.includes("type=") || h.includes("code="));
+  }
 
-    // Only act on Supabase-like hashes
-    if (!h.includes("access_token=") && !h.includes("refresh_token=") && !h.includes("type=") && !h.includes("code=")) return;
+  function rewrite() {
+    try {
+      const hash = window.location.hash || "";
+      if (!hash || hash.length < 2) return false;
+      const h = hash.startsWith("#") ? hash.substring(1) : hash;
 
-    const url = new URL(window.location.href);
-    const params = new URLSearchParams(url.search);
-    const hashParams = new URLSearchParams(h);
+      if (!h.includes("access_token=") && !h.includes("refresh_token=") && !h.includes("type=") && !h.includes("code=")) return false;
 
-    for (const [k, v] of hashParams.entries()) {
-      if (!params.get(k)) params.set(k, v);
-    }
+      const url = new URL(window.location.href);
+      const params = new URLSearchParams(url.search);
+      const hashParams = new URLSearchParams(h);
 
-    url.search = params.toString();
-    url.hash = "";
-    window.location.replace(url.toString());
-  } catch (e) {}
+      for (const [k, v] of hashParams.entries()) {
+        if (!params.get(k)) params.set(k, v);
+      }
+
+      url.search = params.toString();
+      url.hash = "";
+      window.location.replace(url.toString());
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // Auto retry (covers slow hydration + some mobile quirks)
+  if (rewrite()) return;
+  let n = 0;
+  const t = setInterval(() => {
+    n += 1;
+    if (rewrite() || n > 25) clearInterval(t);
+  }, 150);
+
+  // Expose a manual trigger for strict in-app browsers
+  window.__spendlineRewrite = rewrite;
+
+  // If it still needs rewrite after a bit, show a small helper UI
+  setTimeout(() => {
+    if (!needsRewrite()) return;
+    const el = document.createElement("div");
+    el.style.position = "fixed";
+    el.style.left = "50%";
+    el.style.bottom = "18px";
+    el.style.transform = "translateX(-50%)";
+    el.style.zIndex = "99999";
+    el.style.padding = "10px 12px";
+    el.style.borderRadius = "12px";
+    el.style.background = "rgba(15,23,42,0.92)";
+    el.style.color = "white";
+    el.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+    el.style.fontSize = "13px";
+    el.style.boxShadow = "0 10px 30px rgba(0,0,0,0.25)";
+    el.innerHTML = `
+      <div style="display:flex; gap:10px; align-items:center;">
+        <div>Finish password reset:</div>
+        <button id="spendline-continue"
+          style="background:#22c55e;border:none;color:white;padding:8px 10px;border-radius:10px;font-weight:800;cursor:pointer;">
+          Continue
+        </button>
+      </div>`;
+    document.body.appendChild(el);
+    document.getElementById("spendline-continue").onclick = () => {
+      rewrite();
+    };
+  }, 900);
 })();
 </script>
 """,
         height=0,
     )
-
-
-hash_to_query_bridge()
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
