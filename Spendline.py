@@ -11,6 +11,42 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client
 
+import streamlit.components.v1 as components
+
+def hash_to_query_bridge():
+    components.html(
+        """
+<script>
+(function() {
+  try {
+    const hash = window.location.hash || "";
+    if (!hash || hash.length < 2) return;
+
+    const h = hash.startsWith("#") ? hash.substring(1) : hash;
+
+    // Only act on supabase auth-style hashes
+    if (!h.includes("access_token=") && !h.includes("refresh_token=") && !h.includes("type=") && !h.includes("code=")) return;
+
+    const url = new URL(window.location.href);
+    const params = new URLSearchParams(url.search);
+    const hashParams = new URLSearchParams(h);
+
+    for (const [k, v] of hashParams.entries()) {
+      if (!params.get(k)) params.set(k, v);
+    }
+
+    url.search = params.toString();
+    url.hash = "";
+    window.location.replace(url.toString());
+  } catch (e) {}
+})();
+</script>
+""",
+        height=0,
+    )
+
+hash_to_query_bridge()
+
 # =========================================================
 # Spendline.py
 # Run: streamlit run Spendline.py
