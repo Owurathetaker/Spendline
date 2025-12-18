@@ -4,16 +4,12 @@ import zipfile
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
-import streamlit.components.v1 as components
 import httpx
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client
-
-import streamlit.components.v1 as components
-
 
 # =========================================================
 # Spendline.py
@@ -22,9 +18,6 @@ import streamlit.components.v1 as components
 # Phase 2.2 FIX:
 # ✅ Password reset links work (handles URL hash fragments)
 # ✅ Supports both token and PKCE code flows
-#
-# Phase 2.3:
-# ✅ First-run onboarding (simple 3-step) - shows once per user
 #
 # Still:
 # ✅ NO auto session restore for normal visitors
@@ -43,7 +36,10 @@ CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
 MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
 
+
 def hash_to_query_bridge():
+    # Convert Supabase hash fragment (#access_token=...) into query params (?access_token=...)
+    # so Streamlit can read them.
     components.html(
         """
 <script>
@@ -54,7 +50,7 @@ def hash_to_query_bridge():
 
     const h = hash.startsWith("#") ? hash.substring(1) : hash;
 
-    // Only act on supabase auth-style hashes
+    // Only act on Supabase-like hashes
     if (!h.includes("access_token=") && !h.includes("refresh_token=") && !h.includes("type=") && !h.includes("code=")) return;
 
     const url = new URL(window.location.href);
@@ -74,6 +70,7 @@ def hash_to_query_bridge():
 """,
         height=0,
     )
+
 
 hash_to_query_bridge()
 
