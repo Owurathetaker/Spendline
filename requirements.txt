@@ -1,5 +1,6 @@
 streamlit
 pandas
 plotly
-supabase
-python-dateutil
+httpx<0.29
+postgrest==2.27.0
+supabase-auth==2.27.0
