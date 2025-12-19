@@ -11,3 +11,8 @@ __pycache__/
 Thumbs.db
 #
 spendline_data.json
+
+.vscode/
+supabase/
+.venv/
+.streamlit/secrets.toml
