@@ -1,3 +1,4 @@
+#DEPLOY_MARKER: 2025-12-19 v2.3
 import time
 from datetime import datetime, date
 from typing import Any, Callable, Optional
