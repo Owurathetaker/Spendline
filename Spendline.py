@@ -1,25 +1,24 @@
-import io
 import time
-import zipfile
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from supabase import create_client
-from supabase.lib.client_options import ClientOptions
+
+from postgrest import SyncPostgrestClient
+from supabase_auth import SyncGoTrueClient
 
 # =========================================================
 # Spendline.py
 # Run: streamlit run Spendline.py
 #
-# FIX: Password reset works by using PKCE flow.
-# - Supabase sends recovery redirect with ?code=... (not #access_token...)
-# - We exchange code -> session, then allow password update.
-#
-# Policy:
-# ✅ Explicit login required (no auto restore for casual visitors)
+# FIX:
+# ✅ Removes supabase meta-package usage (no create_client / no ClientOptions / no storage attr crash)
+# ✅ Auth: supabase-auth (GoTrue)
+# ✅ DB: postgrest (RLS via Authorization: Bearer <jwt>)
+# ✅ Password reset works with PKCE (?code=...) and recovery screen
+# ✅ Explicit login required (no auto restore)
 # =========================================================
 
 APP_NAME = "Spendline"
@@ -126,35 +125,40 @@ div[data-testid="stButton"] button:hover {{
 
 
 # ----------------------------
-# Supabase client (PKCE)
+# Supabase config + clients
 # ----------------------------
 @st.cache_resource
-def supabase_client():
-    url = st.secrets.get("SUPABASE_URL", "")
-    key = st.secrets.get("SUPABASE_ANON_KEY", "")
+def supabase_config():
+    url = (st.secrets.get("SUPABASE_URL", "") or "").rstrip("/")
+    key = (st.secrets.get("SUPABASE_ANON_KEY", "") or "").strip()
     if not url or not key:
         st.error("Missing SUPABASE_URL / SUPABASE_ANON_KEY in Streamlit secrets.")
         st.stop()
-
-    # PKCE flow is the important bit for recovery links to become ?code=...
-    opts = ClientOptions(flow_type="pkce")
-    return create_client(url, key, options=opts)
+    return url, key
 
 
-sb = supabase_client()
+SUPABASE_URL, SUPABASE_ANON_KEY = supabase_config()
 
 
-def apply_db_auth(access_token: Optional[str]) -> None:
-    if not access_token:
-        return
-    try:
-        pg = getattr(sb, "postgrest", None)
-        if pg and hasattr(pg, "auth"):
-            pg.auth(access_token)
-    except Exception:
-        pass
+@st.cache_resource
+def auth_client():
+    # GoTrue auth endpoint base
+    return SyncGoTrueClient(url=f"{SUPABASE_URL}/auth/v1", headers={"apikey": SUPABASE_ANON_KEY})
 
 
+auth = auth_client()
+
+
+def db_client(access_token: Optional[str]) -> SyncPostgrestClient:
+    headers = {"apikey": SUPABASE_ANON_KEY}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    return SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers=headers)
+
+
+# ----------------------------
+# Retry wrapper
+# ----------------------------
 def sb_exec(call: Callable[[], Any], retries: int = 2, delay: float = 0.6):
     last_err: Optional[Exception] = None
     for i in range(retries + 1):
@@ -198,10 +202,13 @@ def get_user():
     return st.session_state.get("sb_user")
 
 
-def set_user(user, access_token: Optional[str]):
-    st.session_state.sb_user = user
+def get_token() -> Optional[str]:
+    return st.session_state.get("sb_access_token")
+
+
+def set_user(user_obj: Any, access_token: Optional[str]):
+    st.session_state.sb_user = user_obj
     st.session_state.sb_access_token = access_token
-    apply_db_auth(access_token)
 
 
 def clear_user():
@@ -216,31 +223,31 @@ def goto_auth(mode: str):
 
 
 # ----------------------------
-# PKCE recovery handler
+# PKCE recovery
 # ----------------------------
 def maybe_accept_pkce_code_session() -> bool:
     code = st.query_params.get("code")
-    link_type = (st.query_params.get("type") or st.query_params.get("auth") or "").lower()
-
-    # Supabase recovery redirects commonly include type=recovery or you can route via ?auth=recovery
     if not code:
         return False
-    if link_type not in {"recovery"} and st.query_params.get("auth") != "recovery":
-        # still allow exchange if code exists; but keep conservative
-        pass
-
     try:
-        # Per Supabase Python docs, exchange_code_for_session expects {"auth_code": "..."}
-        resp = sb.auth.exchange_code_for_session({"auth_code": code})
-        user = getattr(resp, "user", None)
-        session = getattr(resp, "session", None)
-        token = getattr(session, "access_token", None) if session else None
-        if user:
+        # Some versions accept string, others dict
+        try:
+            resp = auth.exchange_code_for_session(code)
+        except Exception:
+            resp = auth.exchange_code_for_session({"auth_code": code})
+
+        user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+        session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
+
+        token = None
+        if session:
+            token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
+
+        if user and token:
             set_user(user, token)
             return True
     except Exception:
         return False
-
     return False
 
 
@@ -261,13 +268,20 @@ def recovery_reset_password_screen():
         if p1 != p2:
             st.error("Passwords do not match.")
             return
+
+        token = get_token()
+        if not token:
+            st.error("Recovery session missing. Please re-open the reset link from your email.")
+            return
+
         try:
-            sb.auth.update_user({"password": p1})
-            st.success("Password updated ✅ Please log in.")
+            # update_user needs jwt/token
             try:
-                sb.auth.sign_out()
+                auth.update_user({"password": p1}, token)
             except Exception:
-                pass
+                auth.update_user({"password": p1}, jwt=token)
+
+            st.success("Password updated ✅ Please log in.")
             clear_user()
             st.query_params.clear()
             goto_auth("login")
@@ -333,25 +347,26 @@ def signup_view():
             return
 
         try:
-            resp = sb.auth.sign_up({"email": email.strip(), "password": password})
+            resp = auth.sign_up(
+                {
+                    "email": email.strip(),
+                    "password": password,
+                    "data": {"name": name.strip(), "country": country.strip(), "theme": "Light"},
+                }
+            )
         except Exception as e:
             st.error(f"Signup failed: {e}")
             return
 
-        user = getattr(resp, "user", None)
-        session = getattr(resp, "session", None)
+        user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+        session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
 
-        if not user:
-            st.success("Check your email to confirm your account, then log in.")
+        if not user or not session:
+            st.success("Account created ✅ Check your email to confirm, then log in.")
             goto_auth("login")
             return
 
-        try:
-            sb.auth.update_user({"data": {"name": name.strip(), "country": country.strip(), "theme": "Light"}})
-        except Exception:
-            pass
-
-        token = getattr(session, "access_token", None) if session else None
+        token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
         set_user(user, token)
         st.success("Account created ✅")
         st.rerun()
@@ -380,13 +395,13 @@ def login_view():
 
     if submit:
         try:
-            resp = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
-            user = getattr(resp, "user", None)
-            session = getattr(resp, "session", None)
-            if not user:
+            resp = auth.sign_in_with_password({"email": email.strip(), "password": password})
+            user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+            session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
+            if not user or not session:
                 st.error("Login failed. Check your email/password.")
                 return
-            token = getattr(session, "access_token", None) if session else None
+            token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
             set_user(user, token)
             st.success("Logged in ✅")
             st.rerun()
@@ -409,12 +424,14 @@ def forgot_password_view():
         if not email.strip():
             st.error("Enter your email.")
             return
+
+        redirect_to = (st.secrets.get("PASSWORD_RESET_REDIRECT", "") or "").strip()
+        if not redirect_to:
+            st.error("Missing PASSWORD_RESET_REDIRECT in Streamlit secrets.")
+            return
+
         try:
-            redirect_to = (st.secrets.get("PASSWORD_RESET_REDIRECT", "") or "").strip() or None
-            if redirect_to:
-                sb.auth.reset_password_for_email(email.strip(), {"redirect_to": redirect_to})
-            else:
-                sb.auth.reset_password_for_email(email.strip())
+            auth.reset_password_for_email(email.strip(), {"redirect_to": redirect_to})
             st.success("Reset link sent ✅ Check your email.")
         except Exception as e:
             st.error(f"Couldn’t send reset email: {e}")
@@ -423,11 +440,17 @@ def forgot_password_view():
 # ----------------------------
 # Routing (recovery first)
 # ----------------------------
-if maybe_accept_pkce_code_session() and (st.query_params.get("auth") == "recovery" or (st.query_params.get("type") or "").lower() == "recovery"):
-    recovery_reset_password_screen()
+if (st.query_params.get("auth") == "recovery" or (st.query_params.get("type") or "").lower() == "recovery"):
+    if maybe_accept_pkce_code_session():
+        recovery_reset_password_screen()
+        st.stop()
+    inject_theme("Light")
+    st.title("🔑 Reset password")
+    st.warning("This reset link looks incomplete or expired. Please request a new reset email.")
+    st.button("Back to login", width="stretch", on_click=goto_auth, args=("login",))
     st.stop()
 
-# Normal visitors: explicit login required, no auto restore
+
 if not get_user():
     if "auth_mode" not in st.session_state:
         st.session_state["auth_mode"] = "landing"
@@ -447,22 +470,28 @@ if not get_user():
         landing_screen()
     st.stop()
 
+
 # =========================================================
 # APP (db + UI)
 # =========================================================
 user = get_user()
-user_id = getattr(user, "id", None)
-if not user_id:
-    st.error("Session issue. Please log in again.")
-    try:
-        sb.auth.sign_out()
-    except Exception:
-        pass
+token = get_token()
+if not token:
+    st.error("Session token missing. Please log in again.")
     clear_user()
     goto_auth("login")
     st.stop()
 
-md = getattr(user, "user_metadata", {}) or {}
+user_id = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
+md = getattr(user, "user_metadata", None) or (user.get("user_metadata") if isinstance(user, dict) else {}) or {}
+email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else "")
+
+if not user_id:
+    st.error("Session issue. Please log in again.")
+    clear_user()
+    goto_auth("login")
+    st.stop()
+
 theme = (md.get("theme") if isinstance(md, dict) else "Light") or "Light"
 inject_theme(theme)
 
@@ -474,41 +503,43 @@ if "selected_month" not in st.session_state:
 selected_month = st.session_state.selected_month
 
 
+def db():
+    return db_client(token)
+
+
 def ensure_month_row(user_id: str, month: str) -> dict:
-    res = sb_exec(lambda: sb.table("months").select("*").eq("user_id", user_id).eq("month", month).execute())
-    if res.data:
-        return res.data[0]
-    insert = {
-        "user_id": user_id,
-        "month": month,
-        "currency": "USD",
-        "budget": 0,
-        "liabilities": 0,
-    }
-    ins = sb_exec(lambda: sb.table("months").insert(insert).execute())
-    return ins.data[0] if ins.data else insert
+    res = sb_exec(lambda: db().from_("months").select("*").eq("user_id", user_id).eq("month", month).execute())
+    rows = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or []
+    if rows:
+        return rows[0]
+    insert = {"user_id": user_id, "month": month, "currency": "USD", "budget": 0, "liabilities": 0}
+    ins = sb_exec(lambda: db().from_("months").insert(insert).execute())
+    d2 = getattr(ins, "data", None) or (ins.get("data") if isinstance(ins, dict) else None) or []
+    return d2[0] if d2 else insert
 
 
 def update_month(user_id: str, month: str, patch: dict):
     patch = dict(patch)
     patch["updated_at"] = datetime.utcnow().isoformat()
-    return sb_exec(lambda: sb.table("months").update(patch).eq("user_id", user_id).eq("month", month).execute())
+    return sb_exec(lambda: db().from_("months").update(patch).eq("user_id", user_id).eq("month", month).execute())
 
 
 def monthly_history(user_id: str) -> list[dict]:
     res = sb_exec(
-        lambda: sb.table("months")
+        lambda: db()
+        .from_("months")
         .select("month,currency,budget,liabilities,updated_at")
         .eq("user_id", user_id)
         .order("month", desc=True)
         .execute()
     )
-    return res.data or []
+    return getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or []
 
 
 def fetch_expenses(user_id: str, month: str) -> list[dict]:
     res = sb_exec(
-        lambda: sb.table("expenses")
+        lambda: db()
+        .from_("expenses")
         .select("id,occurred_at,amount,category,description")
         .eq("user_id", user_id)
         .eq("month", month)
@@ -516,19 +547,17 @@ def fetch_expenses(user_id: str, month: str) -> list[dict]:
         .limit(500)
         .execute()
     )
-    rows = res.data or []
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "id": r.get("id"),
-                "occurred_at": r.get("occurred_at"),
-                "amount": float(r.get("amount") or 0.0),
-                "category": r.get("category") or "Other",
-                "description": r.get("description") or "",
-            }
-        )
-    return out
+    rows = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or []
+    return [
+        {
+            "id": r.get("id"),
+            "occurred_at": r.get("occurred_at"),
+            "amount": float(r.get("amount") or 0.0),
+            "category": r.get("category") or "Other",
+            "description": r.get("description") or "",
+        }
+        for r in rows
+    ]
 
 
 def add_expense(user_id: str, month: str, amount: float, category: str, desc: Optional[str]):
@@ -540,16 +569,17 @@ def add_expense(user_id: str, month: str, amount: float, category: str, desc: Op
         "description": (desc or "").strip() or None,
         "occurred_at": datetime.utcnow().isoformat(),
     }
-    return sb_exec(lambda: sb.table("expenses").insert(row).execute())
+    return sb_exec(lambda: db().from_("expenses").insert(row).execute())
 
 
 def delete_expense_row(expense_id: str):
-    return sb_exec(lambda: sb.table("expenses").delete().eq("id", expense_id).execute())
+    return sb_exec(lambda: db().from_("expenses").delete().eq("id", expense_id).execute())
 
 
 def fetch_asset_events(user_id: str, month: str) -> list[dict]:
     res = sb_exec(
-        lambda: sb.table("asset_events")
+        lambda: db()
+        .from_("asset_events")
         .select("id,created_at,amount,note")
         .eq("user_id", user_id)
         .eq("month", month)
@@ -557,18 +587,16 @@ def fetch_asset_events(user_id: str, month: str) -> list[dict]:
         .limit(500)
         .execute()
     )
-    rows = res.data or []
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "id": r.get("id"),
-                "created_at": r.get("created_at"),
-                "amount": float(r.get("amount") or 0.0),
-                "note": r.get("note") or "",
-            }
-        )
-    return out
+    rows = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or []
+    return [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "amount": float(r.get("amount") or 0.0),
+            "note": r.get("note") or "",
+        }
+        for r in rows
+    ]
 
 
 def add_asset_event(user_id: str, month: str, amount: float, note: Optional[str]):
@@ -579,11 +607,11 @@ def add_asset_event(user_id: str, month: str, amount: float, note: Optional[str]
         "note": (note or "").strip() or None,
         "created_at": datetime.utcnow().isoformat(),
     }
-    return sb_exec(lambda: sb.table("asset_events").insert(row).execute())
+    return sb_exec(lambda: db().from_("asset_events").insert(row).execute())
 
 
 def delete_asset_event(asset_event_id: str):
-    return sb_exec(lambda: sb.table("asset_events").delete().eq("id", asset_event_id).execute())
+    return sb_exec(lambda: db().from_("asset_events").delete().eq("id", asset_event_id).execute())
 
 
 def sum_spent(expenses: list[dict]) -> float:
@@ -607,13 +635,9 @@ net_worth = assets_total - liabilities
 with st.sidebar:
     name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
-    st.caption(getattr(user, "email", ""))
+    st.caption(email or "")
 
     if st.button("Log out", width="stretch"):
-        try:
-            sb.auth.sign_out()
-        except Exception:
-            pass
         clear_user()
         goto_auth("landing")
 
@@ -729,11 +753,7 @@ with tab_history:
         st.caption("No history yet.")
     else:
         months = [r["month"] for r in rows]
-        pick = st.selectbox(
-            "Select month",
-            months,
-            index=months.index(selected_month) if selected_month in months else 0,
-        )
+        pick = st.selectbox("Select month", months, index=months.index(selected_month) if selected_month in months else 0)
         if pick != selected_month:
             st.session_state.selected_month = pick
             st.rerun()
@@ -752,8 +772,9 @@ with tab_settings:
     st.markdown("### Settings")
     theme_choice = st.selectbox("Theme", ["Light", "Dark"], index=0 if theme != "Dark" else 1)
     if st.button("Save theme", width="stretch"):
+        # Store theme for the current month row (lightweight, avoids admin auth)
         try:
-            sb.auth.update_user({"data": {**(md if isinstance(md, dict) else {}), "theme": theme_choice}})
+            update_month(user_id, selected_month, {"theme": theme_choice})
         except Exception:
             pass
         st.success("Theme saved.")
