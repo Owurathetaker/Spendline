@@ -3,6 +3,8 @@ import time
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
+import streamlit.components.v1 as components
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -36,6 +38,47 @@ MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
+def hash_to_query_bridge() -> None:
+    # Converts URLs like ...?auth=recovery#access_token=... into ...?auth=recovery&access_token=...
+    components.html(
+        """
+<script>
+(function () {
+  try {
+    const hash = window.location.hash || "";
+    if (!hash || hash.length < 2) return;
+ 
+    const h = hash.startsWith("#") ? hash.slice(1) : hash;
+    const hp = new URLSearchParams(h);
+ 
+    // Only act on Supabase auth fragments
+    const hasSupabaseTokens =
+      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in");
+ 
+    if (!hasSupabaseTokens) return;
+ 
+    const url = new URL(window.location.href);
+    const qp = new URLSearchParams(url.search);
+ 
+    for (const [k, v] of hp.entries()) {
+      if (!qp.has(k)) qp.set(k, v);
+    }
+ 
+    url.search = qp.toString();
+    url.hash = "";
+    window.location.replace(url.toString());
+  } catch (e) {
+    // ignore
+  }
+})();
+</script>
+""",
+        height=0,
+    )
+ 
+hash_to_query_bridge()
+
+# st.sidebar.write("QP keys:", list(st.query_params.keys()))
 
 # ----------------------------
 # Theme
@@ -441,34 +484,33 @@ def forgot_password_view():
 # ----------------------------
 # Routing (recovery first)
 # ----------------------------
-if (st.query_params.get("auth") == "recovery" or (st.query_params.get("type") or "").lower() == "recovery"):
-    if maybe_accept_pkce_code_session():
-        recovery_reset_password_screen()
-        st.stop()
-    inject_theme("Light")
-    st.title("🔑 Reset password")
-    st.warning("This reset link looks incomplete or expired. Please request a new reset email.")
-    st.button("Back to login", width="stretch", on_click=goto_auth, args=("login",))
-    st.stop()
+def maybe_accept_recovery_session() -> bool:
+    # Supports BOTH:
+    # - PKCE: ?code=...
+    # - Implicit hash-flow: ?access_token=...&refresh_token=... (after hash_to_query_bridge runs)
+    link_type = (st.query_params.get("type") or "").lower()
+    auth_mode = (st.query_params.get("auth") or "").lower()
+
+    if auth_mode != "recovery" and link_type != "recovery":
+        return False
+
+    # 1) PKCE code flow
+    if st.query_params.get("code"):
+        return maybe_accept_pkce_code_session()
+
+    # 2) Implicit token flow (hash converted to query)
+    access_token = st.query_params.get("access_token")
+    if access_token:
+        # We don't need refresh_token just to update password; access_token is enough.
+        # Set a minimal "user" placeholder; the JWT authorizes update_user().
+        set_user({"id": "recovery"}, access_token)
+        return True
+
+    return False
 
 
-if not get_user():
-    if "auth_mode" not in st.session_state:
-        st.session_state["auth_mode"] = "landing"
-
-    qp_auth = (st.query_params.get("auth") or "").lower()
-    if qp_auth in {"landing", "login", "signup", "forgot"}:
-        st.session_state["auth_mode"] = qp_auth
-
-    mode = st.session_state.get("auth_mode", "landing")
-    if mode == "signup":
-        signup_view()
-    elif mode == "login":
-        login_view()
-    elif mode == "forgot":
-        forgot_password_view()
-    else:
-        landing_screen()
+if maybe_accept_recovery_session():
+    recovery_reset_password_screen()
     st.stop()
 
 
