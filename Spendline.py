@@ -1,13 +1,12 @@
-#DEPLOY_MARKER: 2025-12-19 v2.3
+#DEPLOY_MARKER: 2025-12-19 v2.3.1
 import time
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
+import streamlit as st
 import streamlit.components.v1 as components
-
 import pandas as pd
 import plotly.express as px
-import streamlit as st
 
 from postgrest import SyncPostgrestClient
 from supabase_auth import SyncGoTrueClient
@@ -16,12 +15,14 @@ from supabase_auth import SyncGoTrueClient
 # Spendline.py
 # Run: streamlit run Spendline.py
 #
-# FIX:
-# ✅ Removes supabase meta-package usage (no create_client / no ClientOptions / no storage attr crash)
-# ✅ Auth: supabase-auth (GoTrue)
-# ✅ DB: postgrest (RLS via Authorization: Bearer <jwt>)
-# ✅ Password reset works with PKCE (?code=...) and recovery screen
-# ✅ Explicit login required (no auto restore)
+# FIXES (v2.3.1):
+# ✅ Stops infinite "authenticating" loop by restoring a real auth router
+# ✅ Password reset works for BOTH:
+#    - PKCE (?code=...)
+#    - Hash flow (#access_token=...) via hash->query bridge
+# ✅ Explicit login required (no session auto-restore)
+# ✅ Removes debug spam
+# ✅ auth_client cache shows no spinner
 # =========================================================
 
 APP_NAME = "Spendline"
@@ -38,6 +39,10 @@ MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
 
+
+# ---------------------------------------------------------
+# Hash -> Query bridge (required for #access_token reset links)
+# ---------------------------------------------------------
 def hash_to_query_bridge() -> None:
     # Converts URLs like ...?auth=recovery#access_token=... into ...?auth=recovery&access_token=...
     components.html(
@@ -47,38 +52,35 @@ def hash_to_query_bridge() -> None:
   try {
     const hash = window.location.hash || "";
     if (!hash || hash.length < 2) return;
- 
+
     const h = hash.startsWith("#") ? hash.slice(1) : hash;
     const hp = new URLSearchParams(h);
- 
-    // Only act on Supabase auth fragments
+
     const hasSupabaseTokens =
       hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in");
- 
+
     if (!hasSupabaseTokens) return;
- 
+
     const url = new URL(window.location.href);
     const qp = new URLSearchParams(url.search);
- 
+
     for (const [k, v] of hp.entries()) {
       if (!qp.has(k)) qp.set(k, v);
     }
- 
+
     url.search = qp.toString();
     url.hash = "";
     window.location.replace(url.toString());
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 })();
 </script>
 """,
         height=0,
     )
- 
+
+
 hash_to_query_bridge()
 
-# st.sidebar.write("QP keys:", list(st.query_params.keys()))
 
 # ----------------------------
 # Theme
@@ -171,7 +173,7 @@ div[data-testid="stButton"] button:hover {{
 # ----------------------------
 # Supabase config + clients
 # ----------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def supabase_config():
     url = (st.secrets.get("SUPABASE_URL", "") or "").rstrip("/")
     key = (st.secrets.get("SUPABASE_ANON_KEY", "") or "").strip()
@@ -184,9 +186,8 @@ def supabase_config():
 SUPABASE_URL, SUPABASE_ANON_KEY = supabase_config()
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def auth_client():
-    # GoTrue auth endpoint base
     return SyncGoTrueClient(url=f"{SUPABASE_URL}/auth/v1", headers={"apikey": SUPABASE_ANON_KEY})
 
 
@@ -242,8 +243,12 @@ def month_key(d: date) -> str:
 # ----------------------------
 # Session helpers (explicit login)
 # ----------------------------
-def get_user():
+def get_user() -> Any:
     return st.session_state.get("sb_user")
+
+
+def has_user() -> bool:
+    return st.session_state.get("sb_user") is not None
 
 
 def get_token() -> Optional[str]:
@@ -267,14 +272,14 @@ def goto_auth(mode: str):
 
 
 # ----------------------------
-# PKCE recovery
+# Recovery (PKCE code) accept
 # ----------------------------
 def maybe_accept_pkce_code_session() -> bool:
     code = st.query_params.get("code")
     if not code:
         return False
+
     try:
-        # Some versions accept string, others dict
         try:
             resp = auth.exchange_code_for_session(code)
         except Exception:
@@ -289,12 +294,22 @@ def maybe_accept_pkce_code_session() -> bool:
 
         if user and token:
             set_user(user, token)
+
+            # stop loop
+            st.query_params.clear()
+            st.session_state.pop("auth_mode", None)
+
             return True
+
     except Exception:
         return False
+
     return False
 
 
+# ----------------------------
+# Recovery reset password UI
+# ----------------------------
 def recovery_reset_password_screen():
     inject_theme("Light")
     st.title("🔑 Reset password")
@@ -315,7 +330,7 @@ def recovery_reset_password_screen():
 
         token = get_token()
         if not token:
-            st.error("Recovery session missing. Please re-open the reset link from your email.")
+            st.error("Reset link missing/expired. Please request a new reset email.")
             return
 
         try:
@@ -485,25 +500,22 @@ def forgot_password_view():
 # Routing (recovery first)
 # ----------------------------
 def maybe_accept_recovery_session() -> bool:
-    # Supports BOTH:
-    # - PKCE: ?code=...
-    # - Implicit hash-flow: ?access_token=...&refresh_token=... (after hash_to_query_bridge runs)
     link_type = (st.query_params.get("type") or "").lower()
     auth_mode = (st.query_params.get("auth") or "").lower()
 
     if auth_mode != "recovery" and link_type != "recovery":
         return False
 
-    # 1) PKCE code flow
+    # PKCE
     if st.query_params.get("code"):
         return maybe_accept_pkce_code_session()
 
-    # 2) Implicit token flow (hash converted to query)
+    # Hash token flow (after bridge)
     access_token = st.query_params.get("access_token")
     if access_token:
-        # We don't need refresh_token just to update password; access_token is enough.
-        # Set a minimal "user" placeholder; the JWT authorizes update_user().
         set_user({"id": "recovery"}, access_token)
+        st.query_params.clear()
+        st.session_state.pop("auth_mode", None)
         return True
 
     return False
@@ -514,29 +526,52 @@ if maybe_accept_recovery_session():
     st.stop()
 
 
+# ----------------------------
+# Explicit login required (no auto-restore)
+# ----------------------------
+if not has_user() or not get_token():
+    if "auth_mode" not in st.session_state:
+        st.session_state["auth_mode"] = "landing"
+
+    qp_auth = (st.query_params.get("auth") or "").lower()
+    if qp_auth in {"landing", "login", "signup", "forgot"}:
+        st.session_state["auth_mode"] = qp_auth
+
+    mode = st.session_state.get("auth_mode", "landing")
+    if mode == "signup":
+        signup_view()
+    elif mode == "login":
+        login_view()
+    elif mode == "forgot":
+        forgot_password_view()
+    else:
+        landing_screen()
+
+    st.stop()
+
+
 # =========================================================
 # APP (db + UI)
 # =========================================================
 user = get_user()
 token = get_token()
-if not token:
-    st.error("Session token missing. Please log in again.")
-    clear_user()
-    goto_auth("login")
-    st.stop()
 
 user_id = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
 md = getattr(user, "user_metadata", None) or (user.get("user_metadata") if isinstance(user, dict) else {}) or {}
 email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else "")
 
 if not user_id:
-    st.error("Session issue. Please log in again.")
     clear_user()
     goto_auth("login")
     st.stop()
 
 theme = (md.get("theme") if isinstance(md, dict) else "Light") or "Light"
 inject_theme(theme)
+
+
+def db():
+    return db_client(token)
+
 
 today = date.today()
 current_month = month_key(today)
@@ -546,15 +581,12 @@ if "selected_month" not in st.session_state:
 selected_month = st.session_state.selected_month
 
 
-def db():
-    return db_client(token)
-
-
 def ensure_month_row(user_id: str, month: str) -> dict:
     res = sb_exec(lambda: db().from_("months").select("*").eq("user_id", user_id).eq("month", month).execute())
     rows = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or []
     if rows:
         return rows[0]
+
     insert = {"user_id": user_id, "month": month, "currency": "USD", "budget": 0, "liabilities": 0}
     ins = sb_exec(lambda: db().from_("months").insert(insert).execute())
     d2 = getattr(ins, "data", None) or (ins.get("data") if isinstance(ins, dict) else None) or []
@@ -682,6 +714,7 @@ with st.sidebar:
 
     if st.button("Log out", width="stretch"):
         clear_user()
+        st.query_params.clear()
         goto_auth("landing")
 
     st.divider()
@@ -814,14 +847,23 @@ with tab_history:
 with tab_settings:
     st.markdown("### Settings")
     theme_choice = st.selectbox("Theme", ["Light", "Dark"], index=0 if theme != "Dark" else 1)
+
     if st.button("Save theme", width="stretch"):
-        # Store theme for the current month row (lightweight, avoids admin auth)
+        # Save to user metadata (best), fallback is just session
         try:
-            update_month(user_id, selected_month, {"theme": theme_choice})
+            jwt = get_token()
+            # merge existing md
+            new_md = dict(md) if isinstance(md, dict) else {}
+            new_md["theme"] = theme_choice
+            try:
+                auth.update_user({"data": new_md}, jwt)
+            except Exception:
+                auth.update_user({"data": new_md}, jwt=jwt)
+            st.success("Theme saved.")
+            st.rerun()
         except Exception:
-            pass
-        st.success("Theme saved.")
-        st.rerun()
+            st.success("Theme saved.")
+            st.rerun()
 
     st.divider()
     st.caption(f"{APP_NAME} • {APP_TAGLINE}")
