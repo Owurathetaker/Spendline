@@ -38,19 +38,23 @@ MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
-
+st.sidebar.write("DEPLOY:", "v2.3.1-RESETDEBUG")
+st.sidebar.write("QP:", dict(st.query_params))
 
 # ---------------------------------------------------------
 # Hash -> Query bridge (required for #access_token reset links)
+# IMPORTANT: Must run BEFORE any auth gating / st.stop()
 # ---------------------------------------------------------
 def hash_to_query_bridge() -> None:
-    # Converts URLs like ...?auth=recovery#access_token=... into ...?auth=recovery&access_token=...
     components.html(
         """
 <script>
 (function () {
   try {
-    const hash = window.location.hash || "";
+    // IMPORTANT: Streamlit components run in an iframe.
+    // Use parent location (real page), not iframe location.
+    const loc = window.parent.location;
+    const hash = loc.hash || "";
     if (!hash || hash.length < 2) return;
 
     const h = hash.startsWith("#") ? hash.slice(1) : hash;
@@ -61,8 +65,15 @@ def hash_to_query_bridge() -> None:
 
     if (!hasSupabaseTokens) return;
 
-    const url = new URL(window.location.href);
+    const url = new URL(loc.href);
     const qp = new URLSearchParams(url.search);
+
+    // If already bridged, just remove hash.
+    if (qp.has("access_token") || qp.has("type")) {
+      url.hash = "";
+      window.parent.history.replaceState({}, "", url.toString());
+      return;
+    }
 
     for (const [k, v] of hp.entries()) {
       if (!qp.has(k)) qp.set(k, v);
@@ -70,14 +81,15 @@ def hash_to_query_bridge() -> None:
 
     url.search = qp.toString();
     url.hash = "";
-    window.location.replace(url.toString());
+
+    // Replace URL and reload so Streamlit sees the new query params
+    loc.replace(url.toString());
   } catch (e) {}
 })();
 </script>
 """,
         height=0,
     )
-
 
 hash_to_query_bridge()
 
@@ -530,10 +542,75 @@ if maybe_accept_recovery_session():
 # Explicit login required (no auto-restore)
 # ----------------------------
 if not has_user() or not get_token():
+    qp_auth = (st.query_params.get("auth") or "").lower()
+
+    # ✅ Recovery route: never show landing/login (it hijacks the reset flow)
+    if qp_auth == "recovery":
+        st.markdown("### 🔑 Password reset")
+        st.caption("If the reset link doesn’t open automatically, paste the full reset link from your email below.")
+
+        # If hash->query bridge succeeded already, we should have access_token in query params,
+        # and maybe_accept_recovery_session() (above) will catch it on next rerun.
+        if st.query_params.get("access_token") or st.query_params.get("code"):
+            st.rerun()
+
+        link = st.text_input("Paste full reset link here", key="recovery_paste")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            go = st.button("Continue", width="stretch")
+        with c2:
+            back = st.button("Back to login", width="stretch")
+
+        if back:
+            st.query_params.clear()
+            st.session_state["auth_mode"] = "login"
+            st.query_params["auth"] = "login"
+            st.rerun()
+
+        if go:
+            if not link.strip():
+                st.error("Paste the full link from the reset email.")
+                st.stop()
+
+            # Support both:
+            # 1) PKCE: ?code=...
+            # 2) Hash flow: #access_token=...
+            try:
+                if "?" in link:
+                    qs = link.split("?", 1)[1].split("#", 1)[0]
+                    for part in qs.split("&"):
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            if k in {"code", "type"} and v:
+                                st.query_params["auth"] = "recovery"
+                                st.query_params[k] = v
+
+                if "#" in link:
+                    frag = link.split("#", 1)[1]
+                    for part in frag.split("&"):
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            if k in {"access_token", "refresh_token", "expires_in", "expires_at", "token_type", "type"} and v:
+                                st.query_params["auth"] = "recovery"
+                                st.query_params[k] = v
+
+                # If we extracted anything useful, rerun and let maybe_accept_recovery_session() handle it
+                if st.query_params.get("access_token") or st.query_params.get("code"):
+                    st.rerun()
+
+            except Exception:
+                pass
+
+            st.error("That link didn’t contain a usable recovery token. Request a new reset email and paste it again.")
+            st.stop()
+
+        st.stop()
+
+    # Normal auth routing
     if "auth_mode" not in st.session_state:
         st.session_state["auth_mode"] = "landing"
 
-    qp_auth = (st.query_params.get("auth") or "").lower()
     if qp_auth in {"landing", "login", "signup", "forgot"}:
         st.session_state["auth_mode"] = qp_auth
 
