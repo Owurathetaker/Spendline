@@ -1,10 +1,9 @@
-#DEPLOY_MARKER: 2025-12-19 v2.3.1
+#DEPLOY_MARKER: 2025-12-20 v2.3.2
 import time
 from datetime import datetime, date
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Dict, Tuple
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 
@@ -15,14 +14,13 @@ from supabase_auth import SyncGoTrueClient
 # Spendline.py
 # Run: streamlit run Spendline.py
 #
-# FIXES (v2.3.1):
-# ✅ Stops infinite "authenticating" loop by restoring a real auth router
-# ✅ Password reset works for BOTH:
-#    - PKCE (?code=...)
-#    - Hash flow (#access_token=...) via hash->query bridge
+# FIXES (v2.3.2):
+# ✅ Password reset works reliably on Streamlit Cloud via "Reset debug" sidebar:
+#    - Paste full reset link from email (supports #access_token... and ?code...)
+# ✅ Recovery route always wins over landing/login (no hijack)
+# ✅ No infinite "authenticating" loop
 # ✅ Explicit login required (no session auto-restore)
-# ✅ Removes debug spam
-# ✅ auth_client cache shows no spinner
+# ✅ Uses supabase_auth + postgrest directly (no supabase meta package)
 # =========================================================
 
 APP_NAME = "Spendline"
@@ -38,60 +36,6 @@ MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
-st.sidebar.write("DEPLOY:", "v2.3.1-RESETDEBUG")
-st.sidebar.write("QP:", dict(st.query_params))
-
-# ---------------------------------------------------------
-# Hash -> Query bridge (required for #access_token reset links)
-# IMPORTANT: Must run BEFORE any auth gating / st.stop()
-# ---------------------------------------------------------
-def hash_to_query_bridge() -> None:
-    components.html(
-        """
-<script>
-(function () {
-  try {
-    // IMPORTANT: Streamlit components run in an iframe.
-    // Use parent location (real page), not iframe location.
-    const loc = window.parent.location;
-    const hash = loc.hash || "";
-    if (!hash || hash.length < 2) return;
-
-    const h = hash.startsWith("#") ? hash.slice(1) : hash;
-    const hp = new URLSearchParams(h);
-
-    const hasSupabaseTokens =
-      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in");
-
-    if (!hasSupabaseTokens) return;
-
-    const url = new URL(loc.href);
-    const qp = new URLSearchParams(url.search);
-
-    // If already bridged, just remove hash.
-    if (qp.has("access_token") || qp.has("type")) {
-      url.hash = "";
-      window.parent.history.replaceState({}, "", url.toString());
-      return;
-    }
-
-    for (const [k, v] of hp.entries()) {
-      if (!qp.has(k)) qp.set(k, v);
-    }
-
-    url.search = qp.toString();
-    url.hash = "";
-
-    // Replace URL and reload so Streamlit sees the new query params
-    loc.replace(url.toString());
-  } catch (e) {}
-})();
-</script>
-""",
-        height=0,
-    )
-
-hash_to_query_bridge()
 
 
 # ----------------------------
@@ -186,7 +130,7 @@ div[data-testid="stButton"] button:hover {{
 # Supabase config + clients
 # ----------------------------
 @st.cache_resource(show_spinner=False)
-def supabase_config():
+def supabase_config() -> Tuple[str, str]:
     url = (st.secrets.get("SUPABASE_URL", "") or "").rstrip("/")
     key = (st.secrets.get("SUPABASE_ANON_KEY", "") or "").strip()
     if not url or not key:
@@ -199,7 +143,7 @@ SUPABASE_URL, SUPABASE_ANON_KEY = supabase_config()
 
 
 @st.cache_resource(show_spinner=False)
-def auth_client():
+def auth_client() -> SyncGoTrueClient:
     return SyncGoTrueClient(url=f"{SUPABASE_URL}/auth/v1", headers={"apikey": SUPABASE_ANON_KEY})
 
 
@@ -284,6 +228,82 @@ def goto_auth(mode: str):
 
 
 # ----------------------------
+# Recovery link parsing (works even when email link uses URL hash)
+# ----------------------------
+def _parse_kv_string(s: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not s:
+        return out
+    for part in s.split("&"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k = (k or "").strip()
+            v = (v or "").strip()
+            if k and v:
+                out[k] = v
+    return out
+
+
+def parse_recovery_link(link: str) -> Dict[str, str]:
+    """
+    Supports:
+      - https://.../?auth=recovery#access_token=...&type=recovery
+      - https://.../?code=...&type=recovery
+      - raw fragment: access_token=...&type=recovery
+    Returns params we should apply into st.query_params.
+    """
+    link = (link or "").strip()
+    if not link:
+        return {}
+
+    # allow user to paste just the fragment
+    if "://" not in link and ("access_token=" in link or "code=" in link):
+        # treat as fragment/qs
+        parts = link.split("#", 1)
+        if len(parts) == 2:
+            link = "http://dummy/?" + parts[0] + "#" + parts[1]
+        else:
+            link = "http://dummy/?" + link
+
+    qs_part = ""
+    frag_part = ""
+
+    if "?" in link:
+        qs_part = link.split("?", 1)[1]
+    if "#" in link:
+        frag_part = link.split("#", 1)[1]
+        # remove fragment from qs if both exist
+        if qs_part and "#" in qs_part:
+            qs_part = qs_part.split("#", 1)[0]
+
+    qs_params = _parse_kv_string(qs_part)
+    frag_params = _parse_kv_string(frag_part)
+
+    # Merge, fragment wins for tokens
+    merged = dict(qs_params)
+    merged.update(frag_params)
+
+    # Force recovery mode if this looks like a recovery link
+    looks_like_recovery = (
+        merged.get("type", "").lower() == "recovery"
+        or "access_token" in merged
+        or "code" in merged
+    )
+    if looks_like_recovery:
+        merged["auth"] = "recovery"
+        if "type" not in merged:
+            merged["type"] = "recovery"
+
+    # Only keep relevant keys
+    allow = {
+        "auth", "type", "code",
+        "access_token", "refresh_token",
+        "expires_in", "expires_at", "token_type",
+    }
+    return {k: v for k, v in merged.items() if k in allow}
+
+
+# ----------------------------
 # Recovery (PKCE code) accept
 # ----------------------------
 def maybe_accept_pkce_code_session() -> bool:
@@ -306,11 +326,9 @@ def maybe_accept_pkce_code_session() -> bool:
 
         if user and token:
             set_user(user, token)
-
             # stop loop
             st.query_params.clear()
             st.session_state.pop("auth_mode", None)
-
             return True
 
     except Exception:
@@ -346,7 +364,6 @@ def recovery_reset_password_screen():
             return
 
         try:
-            # update_user needs jwt/token
             try:
                 auth.update_user({"password": p1}, token)
             except Exception:
@@ -358,6 +375,76 @@ def recovery_reset_password_screen():
             goto_auth("login")
         except Exception as e:
             st.error(f"Couldn’t update password: {e}")
+
+
+# ----------------------------
+# Recovery routing (ALWAYS runs before auth gating)
+# ----------------------------
+def maybe_accept_recovery_session() -> bool:
+    link_type = (st.query_params.get("type") or "").lower()
+    auth_mode = (st.query_params.get("auth") or "").lower()
+
+    # Recovery must be explicitly indicated OR tokens are present
+    has_tokens = bool(st.query_params.get("access_token") or st.query_params.get("code"))
+    if not has_tokens and auth_mode != "recovery" and link_type != "recovery":
+        return False
+
+    # PKCE
+    if st.query_params.get("code"):
+        return maybe_accept_pkce_code_session()
+
+    # Hash/token flow (access_token present)
+    access_token = st.query_params.get("access_token")
+    if access_token:
+        set_user({"id": "recovery"}, access_token)
+        st.query_params.clear()
+        st.session_state.pop("auth_mode", None)
+        return True
+
+    return False
+
+
+# ----------------------------
+# Sidebar "Reset debug" (paste link)
+# ----------------------------
+def reset_debug_sidebar():
+    with st.sidebar:
+        st.write("🔧 Reset debug")
+        st.caption("Paste the reset link from the email here (works even if it contains #access_token).")
+        pasted = st.text_input("Reset link", key="__reset_link_paste")
+        c1, c2 = st.columns(2)
+        go = c1.button("Continue", use_container_width=True)
+        clear = c2.button("Clear", use_container_width=True)
+
+        st.write("—")
+        st.caption("Live query params:")
+        st.code(str(dict(st.query_params)))
+
+        if clear:
+            st.session_state.pop("__reset_link_paste", None)
+            # don't clear query params automatically here
+            st.rerun()
+
+        if go:
+            params = parse_recovery_link(pasted)
+            if not params or not (params.get("access_token") or params.get("code")):
+                st.error("That link doesn’t contain a usable recovery token/code. Request a new reset email and paste again.")
+                st.stop()
+
+            # Apply and rerun so recovery handler catches it immediately
+            st.query_params.clear()
+            for k, v in params.items():
+                st.query_params[k] = v
+            st.rerun()
+
+
+# Always show reset debug sidebar (you asked for it)
+reset_debug_sidebar()
+
+# ---- RECOVERY FIRST ----
+if maybe_accept_recovery_session():
+    recovery_reset_password_screen()
+    st.stop()
 
 
 # ----------------------------
@@ -509,102 +596,16 @@ def forgot_password_view():
 
 
 # ----------------------------
-# Routing (recovery first)
-# ----------------------------
-def maybe_accept_recovery_session() -> bool:
-    link_type = (st.query_params.get("type") or "").lower()
-    auth_mode = (st.query_params.get("auth") or "").lower()
-
-    if auth_mode != "recovery" and link_type != "recovery":
-        return False
-
-    # PKCE
-    if st.query_params.get("code"):
-        return maybe_accept_pkce_code_session()
-
-    # Hash token flow (after bridge)
-    access_token = st.query_params.get("access_token")
-    if access_token:
-        set_user({"id": "recovery"}, access_token)
-        st.query_params.clear()
-        st.session_state.pop("auth_mode", None)
-        return True
-
-    return False
-
-
-if maybe_accept_recovery_session():
-    recovery_reset_password_screen()
-    st.stop()
-
-
-# ----------------------------
 # Explicit login required (no auto-restore)
 # ----------------------------
 if not has_user() or not get_token():
     qp_auth = (st.query_params.get("auth") or "").lower()
 
-    # ✅ Recovery route: never show landing/login (it hijacks the reset flow)
+    # If someone lands on /?auth=recovery but tokens aren’t present yet, guide them
     if qp_auth == "recovery":
+        inject_theme("Light")
         st.markdown("### 🔑 Password reset")
-        st.caption("If the reset link doesn’t open automatically, paste the full reset link from your email below.")
-
-        # If hash->query bridge succeeded already, we should have access_token in query params,
-        # and maybe_accept_recovery_session() (above) will catch it on next rerun.
-        if st.query_params.get("access_token") or st.query_params.get("code"):
-            st.rerun()
-
-        link = st.text_input("Paste full reset link here", key="recovery_paste")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            go = st.button("Continue", width="stretch")
-        with c2:
-            back = st.button("Back to login", width="stretch")
-
-        if back:
-            st.query_params.clear()
-            st.session_state["auth_mode"] = "login"
-            st.query_params["auth"] = "login"
-            st.rerun()
-
-        if go:
-            if not link.strip():
-                st.error("Paste the full link from the reset email.")
-                st.stop()
-
-            # Support both:
-            # 1) PKCE: ?code=...
-            # 2) Hash flow: #access_token=...
-            try:
-                if "?" in link:
-                    qs = link.split("?", 1)[1].split("#", 1)[0]
-                    for part in qs.split("&"):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            if k in {"code", "type"} and v:
-                                st.query_params["auth"] = "recovery"
-                                st.query_params[k] = v
-
-                if "#" in link:
-                    frag = link.split("#", 1)[1]
-                    for part in frag.split("&"):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            if k in {"access_token", "refresh_token", "expires_in", "expires_at", "token_type", "type"} and v:
-                                st.query_params["auth"] = "recovery"
-                                st.query_params[k] = v
-
-                # If we extracted anything useful, rerun and let maybe_accept_recovery_session() handle it
-                if st.query_params.get("access_token") or st.query_params.get("code"):
-                    st.rerun()
-
-            except Exception:
-                pass
-
-            st.error("That link didn’t contain a usable recovery token. Request a new reset email and paste it again.")
-            st.stop()
-
+        st.caption("Paste your reset link into the sidebar → **Reset debug** → Continue.")
         st.stop()
 
     # Normal auth routing
@@ -785,6 +786,7 @@ net_worth = assets_total - liabilities
 
 
 with st.sidebar:
+    st.write("—")
     name = md.get("name", "") if isinstance(md, dict) else ""
     st.header(f"👤 {name or 'User'}")
     st.caption(email or "")
@@ -926,10 +928,8 @@ with tab_settings:
     theme_choice = st.selectbox("Theme", ["Light", "Dark"], index=0 if theme != "Dark" else 1)
 
     if st.button("Save theme", width="stretch"):
-        # Save to user metadata (best), fallback is just session
         try:
             jwt = get_token()
-            # merge existing md
             new_md = dict(md) if isinstance(md, dict) else {}
             new_md["theme"] = theme_choice
             try:
