@@ -1,24 +1,24 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Spendline Reset</title>
-  </head>
-  <body>
-    <script>
-      (function () {
-        const STREAMLIT = "https://spendline.streamlit.app/?auth=recovery";
-        const hash = window.location.hash || "";
-        if (!hash || hash.length < 2) {
-          window.location.replace(STREAMLIT);
-          return;
-        }
-        const h = hash.startsWith("#") ? hash.slice(1) : hash;
-        // forward hash into query so Streamlit can read it
-        window.location.replace(STREAMLIT + "&" + h);
-      })();
-    </script>
-    Redirecting…
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <title>Reset Password</title>
+  <script>
+    const hash = window.location.hash;
+    const query = window.location.search;
+
+    const target = "https://spendline.streamlit.app/?auth=recovery";
+
+    if (hash) {
+      window.location.replace(target + hash);
+    } else if (query) {
+      window.location.replace(target + query);
+    } else {
+      document.body.innerText = "Invalid reset link.";
+    }
+  </script>
+</head>
+<body>
+  Redirecting…
+</body>
 </html>
