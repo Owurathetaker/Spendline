@@ -1,24 +1,53 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <title>Reset Password</title>
-  <script>
-    const hash = window.location.hash;
-    const query = window.location.search;
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Spendline — Reset Password</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; }
+      code { background:#f2f2f2; padding:2px 6px; border-radius:6px; }
+    </style>
+  </head>
+  <body>
+    <h2>Resetting your password…</h2>
+    <p id="msg">Please wait.</p>
 
-    const target = "https://spendline.streamlit.app/?auth=recovery";
+    <script>
+      (function () {
+        const STREAMLIT = "https://spendline.streamlit.app/";
 
-    if (hash) {
-      window.location.replace(target + hash);
-    } else if (query) {
-      window.location.replace(target + query);
-    } else {
-      document.body.innerText = "Invalid reset link.";
-    }
-  </script>
-</head>
-<body>
-  Redirecting…
-</body>
+        const url = new URL(window.location.href);
+        const hash = window.location.hash || "";     // may contain #access_token=...&type=recovery
+        const code = url.searchParams.get("code");   // PKCE flow may contain ?code=...
+
+        // If Supabase redirected here correctly, we should have either:
+        // - hash with access_token
+        // - query param code
+        const hasAccessToken = hash.includes("access_token=");
+        const hasCode = !!code;
+
+        if (hasAccessToken || hasCode) {
+          const out = new URL(STREAMLIT);
+          out.searchParams.set("auth", "recovery");
+
+          // forward PKCE code if present
+          if (hasCode) out.searchParams.set("code", code);
+
+          // forward hash tokens if present
+          // keep the hash exactly as-is so Streamlit can bridge it
+          out.hash = hasAccessToken ? hash.replace(/^#/, "") : "";
+
+          document.getElementById("msg").textContent = "Opening Spendline reset screen…";
+          window.location.replace(out.toString());
+          return;
+        }
+
+        // If we got here with no token/code, the redirect didn’t include auth payload.
+        document.getElementById("msg").innerHTML =
+          "No recovery token found on this page.<br><br>" +
+          "Go back to your email and click the reset link again (request a new one if needed).";
+      })();
+    </script>
+  </body>
 </html>
