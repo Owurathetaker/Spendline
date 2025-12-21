@@ -375,7 +375,9 @@ def maybe_accept_verify_token_session() -> bool:
 
     return False
 
-
+# 🔒 Lock reruns while user is typing password
+if "reset_lock" not in st.session_state:
+    st.session_state.reset_lock = True
 # ----------------------------
 # Recovery reset password UI
 # ----------------------------
@@ -689,7 +691,7 @@ def recovery_paste_screen():
 # ----------------------------
 # Explicit login required (no auto-restore)
 # ----------------------------
-if not has_user() or not get_token():
+if (not has_user() or not get_token()) and not st.session_state.get("reset_lock"):
     qp_auth = (st.query_params.get("auth") or "").lower()
 
     # If user is on recovery route, do NOT show landing/login. Show paste screen instead.
@@ -730,6 +732,7 @@ email = getattr(user, "email", None) or (user.get("email") if isinstance(user, d
 if not user_id or len(str(user_id)) < 20:
     clear_user()
     st.query_params.clear()
+    st.session_state.pop("reset_lock", None)
     goto_auth("login")
     st.stop()
 
