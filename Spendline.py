@@ -4,6 +4,7 @@ import base64
 import json
 from datetime import datetime, date
 from typing import Any, Callable, Optional
+import httpx
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -402,17 +403,24 @@ def recovery_reset_password_screen():
             return
 
         try:
-            try:
-                auth.update_user({"password": p1}, token)
-            except Exception:
-                auth.update_user({"password": p1}, jwt=token)
+            # ✅ Update password via GoTrue REST (reliable)
+            url = f"{SUPABASE_URL}/auth/v1/user"
+            headers = {
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
 
-            st.success("Password updated ✅ Please log in.")
+            r = httpx.patch(url, headers=headers, json={"password": p1}, timeout=20.0)
+            if r.status_code >= 400:
+                st.error(f"Couldn’t update password: {r.status_code} {r.text}")
+                return
+
+            st.success("Password updated ✅ Please log in with the NEW password.")
             clear_user()
             st.query_params.clear()
-            st.session_state["auth_mode"] = "login"
-            st.query_params["auth"] = "login"
-            st.rerun()
+            goto_auth("login")
+
         except Exception as e:
             st.error(f"Couldn’t update password: {e}")
 

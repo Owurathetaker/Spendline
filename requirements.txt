@@ -4,3 +4,5 @@ plotly
 httpx<0.29
 postgrest==2.27.0
 supabase-auth==2.27.0
+
+httpx>=0.26
