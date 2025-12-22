@@ -1,4 +1,4 @@
-#DEPLOY_MARKER: 2025-12-22 v2.3.3
+#DEPLOY_MARKER: 2025-12-22 v2.3.4
 
 import streamlit as st
 
@@ -9,38 +9,35 @@ if st.query_params.get("ping") == "1":
     st.title("✅ Spendline.py is running")
     st.write("Query params:", dict(st.query_params))
     st.stop()
-    
-# ✅ This must run BEFORE any other imports (to prove imports aren't hanging)
-if st.query_params.get("ping") == "1":
-    st.title("✅ Spendline ping OK")
-    st.write("Ping reached BEFORE heavy imports.")
-    st.stop()
 
 # ---- heavy imports AFTER ping ----
 import time
+import json
+import base64
+import re
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 
 import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
+import httpx
 
 from postgrest import SyncPostgrestClient
-from supabase_auth import SyncGoTrueClientss
+from supabase_auth import SyncGoTrueClient
 
 # =========================================================
 # Spendline.py
-# Run: streamlit run Spendline.py
 #
-# FIXES (v2.3.3):
+# FIXES (v2.3.4):
 # ✅ Password reset works for ALL common Supabase flows:
 #    1) verify?token=...&type=recovery (email link)
 #    2) ?code=... (PKCE)
 #    3) #access_token=... (hash) via hash->query bridge
-# ✅ Avoids landing/login hijacking the recovery flow
-# ✅ Fixes PostgREST crash by ensuring user_id is real UUID (from JWT "sub")
+# ✅ Recovery is handled BEFORE landing/login can hijack it
+# ✅ Prevents hash-bridge infinite reload loops (sessionStorage flag)
+# ✅ Fixes PostgREST crash by ensuring user_id is UUID-like
 # ✅ Explicit login required (no session auto-restore)
-# ✅ No debug spam by default
 # =========================================================
 
 APP_NAME = "Spendline"
@@ -55,12 +52,6 @@ CURRENCIES = {"USD": "$", "GHS": "₵", "EUR": "€", "GBP": "£", "NGN": "₦"}
 MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
 
-st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
-# ✅ Quick health-check: if the app can't render this, it's a deploy/build issue (not auth logic)
-if st.query_params.get("ping") == "1":
-    st.title("✅ Spendline ping OK")
-    st.write("The app can render. Any spinner after this is coming from later code (auth/reset/router).")
-    st.stop()
 
 # ---------------------------------------------------------
 # Hash -> Query bridge (required for #access_token reset links)
@@ -72,12 +63,10 @@ def hash_to_query_bridge() -> None:
 <script>
 (function () {
   try {
+    // Run only once per browser session to avoid loops
+    if (window.sessionStorage.getItem("spendline_hash_bridged") === "1") return;
+
     const loc = window.parent.location;
-
-    // ✅ If we've already bridged once, never do it again.
-    const url0 = new URL(loc.href);
-    if (url0.searchParams.get("bridged") === "1") return;
-
     const hash = loc.hash || "";
     if (!hash || hash.length < 2) return;
 
@@ -85,24 +74,22 @@ def hash_to_query_bridge() -> None:
     const hp = new URLSearchParams(h);
 
     const hasSupabaseTokens =
-      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in");
+      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in") || hp.has("expires_at");
 
     if (!hasSupabaseTokens) return;
 
     const url = new URL(loc.href);
     const qp = new URLSearchParams(url.search);
 
-    // Move hash params -> query params
     for (const [k, v] of hp.entries()) {
       if (!qp.has(k)) qp.set(k, v);
     }
 
-    // ✅ Add marker so we don't loop
-    qp.set("bridged", "1");
+    // Mark bridged to prevent infinite reload
+    window.sessionStorage.setItem("spendline_hash_bridged", "1");
 
     url.search = qp.toString();
     url.hash = "";
-
     loc.replace(url.toString());
   } catch (e) {}
 })();
@@ -112,7 +99,9 @@ def hash_to_query_bridge() -> None:
     )
 
 
-hash_to_query_bridge()
+# Run bridge unless ping
+if st.query_params.get("ping") != "1":
+    hash_to_query_bridge()
 
 
 # ----------------------------
@@ -253,6 +242,14 @@ def sb_exec(call: Callable[[], Any], retries: int = 2, delay: float = 0.6):
 # ----------------------------
 # Helpers
 # ----------------------------
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def is_uuid(x: Any) -> bool:
+    s = str(x or "").strip()
+    return bool(UUID_RE.match(s))
+
+
 def sym(code: str) -> str:
     return CURRENCIES.get(code, "$")
 
@@ -274,7 +271,7 @@ def month_key(d: date) -> str:
 
 
 def jwt_claim(token: str, key: str) -> Optional[str]:
-    """Extract claim from JWT payload without verifying signature (safe for routing)."""
+    """Extract claim from JWT payload without verifying signature (routing only)."""
     try:
         parts = token.split(".")
         if len(parts) < 2:
@@ -354,26 +351,22 @@ def maybe_accept_pkce_code_session() -> bool:
 
 def maybe_accept_verify_token_session() -> bool:
     """
-    Accepts Supabase email link:
-      /auth/v1/verify?token=...&type=recovery&redirect_to=...
-    by calling verify_otp (GoTrue) to obtain a session.
+    Accepts reset email link parameters:
+      token=...&type=recovery
+    by calling verify_otp to obtain a session.
     """
     vtoken = st.query_params.get("token")
     vtype = (st.query_params.get("type") or "").lower()
-
-    if not vtoken or vtype not in {"recovery", "magiclink", "signup", "invite"}:
+    if not vtoken or vtype != "recovery":
         return False
 
-    # Only recovery should route to reset screen, but verify_otp works for others too.
     try:
-        if hasattr(auth, "verify_otp"):
+        # Common signature: verify_otp({"token": ..., "type": ...})
+        try:
             resp = auth.verify_otp({"token": vtoken, "type": vtype})
-        else:
-            # Some versions name it verifyOtp (unlikely), keep safe fallback:
-            verify_fn = getattr(auth, "verifyOtp", None)
-            if not verify_fn:
-                return False
-            resp = verify_fn({"token": vtoken, "type": vtype})
+        except Exception:
+            # Some clients accept kwargs
+            resp = auth.verify_otp(token=vtoken, type=vtype)
 
         user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
         session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
@@ -392,9 +385,7 @@ def maybe_accept_verify_token_session() -> bool:
 
     return False
 
-# 🔒 Lock reruns while user is typing password
-if "reset_lock" not in st.session_state:
-    st.session_state.reset_lock = True
+
 # ----------------------------
 # Recovery reset password UI
 # ----------------------------
@@ -406,42 +397,45 @@ def recovery_reset_password_screen():
     with st.form("reset_pw_form"):
         p1 = st.text_input("New password", type="password")
         p2 = st.text_input("Confirm new password", type="password")
-        submit = st.form_submit_button("Update password", width="stretch")
+        submit = st.form_submit_button("Update password", use_container_width=True)
 
-    if submit:
-        if len(p1) < 6:
-            st.error("Password must be at least 6 characters.")
-            return
-        if p1 != p2:
-            st.error("Passwords do not match.")
-            return
+    if not submit:
+        st.stop()
 
-        token = get_token()
-        if not token:
-            st.error("Reset link missing/expired. Please request a new reset email.")
-            return
+    if len(p1) < 6:
+        st.error("Password must be at least 6 characters.")
+        st.stop()
+    if p1 != p2:
+        st.error("Passwords do not match.")
+        st.stop()
 
-        try:
-            # ✅ Update password via GoTrue REST (reliable)
-            url = f"{SUPABASE_URL}/auth/v1/user"
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
+    token = get_token()
+    if not token:
+        st.error("Reset link missing/expired. Please request a new reset email.")
+        st.stop()
 
-            r = httpx.patch(url, headers=headers, json={"password": p1}, timeout=20.0)
-            if r.status_code >= 400:
-                st.error(f"Couldn’t update password: {r.status_code} {r.text}")
-                return
+    try:
+        # Reliable: PATCH /auth/v1/user with Bearer <access_token>
+        url = f"{SUPABASE_URL}/auth/v1/user"
+        headers = {
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        r = httpx.patch(url, headers=headers, json={"password": p1}, timeout=20.0)
 
-            st.success("Password updated ✅ Please log in with the NEW password.")
-            clear_user()
-            st.query_params.clear()
-            goto_auth("login")
+        if r.status_code >= 400:
+            st.error(f"Couldn’t update password: {r.status_code} {r.text}")
+            st.stop()
 
-        except Exception as e:
-            st.error(f"Couldn’t update password: {e}")
+        st.success("Password updated ✅ Please log in with the NEW password.")
+        clear_user()
+        st.query_params.clear()
+        goto_auth("login")
+
+    except Exception as e:
+        st.error(f"Couldn’t update password: {e}")
+        st.stop()
 
 
 # ----------------------------
@@ -465,9 +459,9 @@ def landing_screen():
     st.markdown("")
     c1, c2 = st.columns(2)
     with c1:
-        st.button("Log in", width="stretch", on_click=goto_auth, args=("login",))
+        st.button("Log in", use_container_width=True, on_click=goto_auth, args=("login",))
     with c2:
-        st.button("Sign up", width="stretch", on_click=goto_auth, args=("signup",))
+        st.button("Sign up", use_container_width=True, on_click=goto_auth, args=("signup",))
     st.caption("No demo mode. You’ll always need an account to access Spendline.")
 
 
@@ -475,7 +469,7 @@ def signup_view():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
     st.caption("Create an account to start tracking your money.")
-    if st.button("← Back", width="stretch"):
+    if st.button("← Back", use_container_width=True):
         goto_auth("landing")
 
     st.subheader("Sign up")
@@ -485,148 +479,163 @@ def signup_view():
         country = st.text_input("Country (optional)", value="gh")
         password = st.text_input("Password", type="password")
         password2 = st.text_input("Confirm password", type="password")
-        submit = st.form_submit_button("Create account", width="stretch")
+        submit = st.form_submit_button("Create account", use_container_width=True)
 
-    if st.button("Already have an account? Log in", width="stretch"):
+    if st.button("Already have an account? Log in", use_container_width=True):
         goto_auth("login")
 
-    if submit:
-        if not name.strip():
-            st.error("Please enter your name.")
-            return
-        if len(password) < 6:
-            st.error("Password must be at least 6 characters.")
-            return
-        if password != password2:
-            st.error("Passwords do not match.")
-            return
+    if not submit:
+        st.stop()
 
-        try:
-            resp = auth.sign_up(
-                {
-                    "email": email.strip(),
-                    "password": password,
-                    "data": {"name": name.strip(), "country": country.strip(), "theme": "Light"},
-                }
-            )
-        except Exception as e:
-            st.error(f"Signup failed: {e}")
-            return
+    if not name.strip():
+        st.error("Please enter your name.")
+        st.stop()
+    if len(password) < 6:
+        st.error("Password must be at least 6 characters.")
+        st.stop()
+    if password != password2:
+        st.error("Passwords do not match.")
+        st.stop()
 
-        user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
-        session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
+    try:
+        resp = auth.sign_up(
+            {
+                "email": email.strip(),
+                "password": password,
+                "data": {"name": name.strip(), "country": country.strip(), "theme": "Light"},
+            }
+        )
+    except Exception as e:
+        st.error(f"Signup failed: {e}")
+        st.stop()
 
-        if not user or not session:
-            st.success("Account created ✅ Check your email to confirm, then log in.")
-            goto_auth("login")
-            return
+    user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+    session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
 
-        token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
-        set_user(user, token)
-        st.success("Account created ✅")
-        st.rerun()
+    if not user or not session:
+        st.success("Account created ✅ Check your email to confirm, then log in.")
+        goto_auth("login")
+        st.stop()
+
+    token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
+    set_user(user, token)
+    st.success("Account created ✅")
+    st.rerun()
 
 
 def login_view():
     inject_theme("Light")
     st.title(f"💰 {APP_NAME}")
     st.caption("Welcome back. Log in to continue.")
-    if st.button("← Back", width="stretch"):
+    if st.button("← Back", use_container_width=True):
         goto_auth("landing")
 
     st.subheader("Log in")
     with st.form("login_form", clear_on_submit=False):
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_pwd")
-        submit = st.form_submit_button("Log in", width="stretch")
+        submit = st.form_submit_button("Log in", use_container_width=True)
 
     cols = st.columns(2)
     with cols[0]:
-        if st.button("Create account", width="stretch"):
+        if st.button("Create account", use_container_width=True):
             goto_auth("signup")
     with cols[1]:
-        if st.button("Forgot password?", width="stretch"):
+        if st.button("Forgot password?", use_container_width=True):
             goto_auth("forgot")
 
-    if submit:
-        try:
-            resp = auth.sign_in_with_password({"email": email.strip(), "password": password})
-            user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
-            session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
-            if not user or not session:
-                st.error("Login failed. Check your email/password.")
-                return
-            token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
-            set_user(user, token)
-            st.success("Logged in ✅")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Login failed: {e}")
+    if not submit:
+        st.stop()
+
+    try:
+        resp = auth.sign_in_with_password({"email": email.strip(), "password": password})
+        user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+        session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
+        if not user or not session:
+            st.error("Login failed. Check your email/password.")
+            st.stop()
+        token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
+        set_user(user, token)
+        st.success("Logged in ✅")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Login failed: {e}")
+        st.stop()
 
 
 def forgot_password_view():
     inject_theme("Light")
     st.title("🔑 Password reset")
     st.caption("Enter your email. We’ll send you a reset link.")
-    if st.button("← Back", width="stretch"):
+    if st.button("← Back", use_container_width=True):
         goto_auth("login")
 
     with st.form("forgot_pw_form"):
         email = st.text_input("Email")
-        submit = st.form_submit_button("Send reset link", width="stretch")
+        submit = st.form_submit_button("Send reset link", use_container_width=True)
 
-    if submit:
-        if not email.strip():
-            st.error("Enter your email.")
-            return
+    if not submit:
+        st.stop()
 
-        redirect_to = (st.secrets.get("PASSWORD_RESET_REDIRECT", "") or "").strip()
-        if not redirect_to:
-            st.error("Missing PASSWORD_RESET_REDIRECT in Streamlit secrets.")
-            return
+    if not email.strip():
+        st.error("Enter your email.")
+        st.stop()
 
-        try:
-            auth.reset_password_for_email(email.strip(), {"redirect_to": redirect_to})
-            st.success("Reset link sent ✅ Check your email.")
-        except Exception as e:
-            st.error(f"Couldn’t send reset email: {e}")
+    redirect_to = (st.secrets.get("PASSWORD_RESET_REDIRECT", "") or "").strip()
+    if not redirect_to:
+        st.error("Missing PASSWORD_RESET_REDIRECT in Streamlit secrets.")
+        st.stop()
+
+    try:
+        auth.reset_password_for_email(email.strip(), {"redirect_to": redirect_to})
+        st.success("Reset link sent ✅ Check your email.")
+    except Exception as e:
+        st.error(f"Couldn’t send reset email: {e}")
+        st.stop()
 
 
 # ----------------------------
 # Routing (recovery first)
 # ----------------------------
-def maybe_accept_recovery_session() -> bool:
-    """
-    Accept recovery sessions from:
-    - verify?token=... (query)
-    - ?code=... (query)
-    - access_token=... (query after hash bridge)
-    """
+def is_recovery_attempt() -> bool:
     auth_mode = (st.query_params.get("auth") or "").lower()
     link_type = (st.query_params.get("type") or "").lower()
 
-    # We only auto-handle if user is trying to do recovery
-    if auth_mode != "recovery" and link_type != "recovery":
+    # Accept recovery even if "auth" is missing as long as it looks like a recovery link
+    if auth_mode == "recovery" or link_type == "recovery":
+        return True
+    if st.query_params.get("token") and link_type == "recovery":
+        return True
+    if st.query_params.get("code") and link_type == "recovery":
+        return True
+    if st.query_params.get("access_token") and link_type == "recovery":
+        return True
+    return False
+
+
+def maybe_accept_recovery_session() -> bool:
+    # Only try recovery if this URL looks like a recovery attempt
+    if not is_recovery_attempt():
         return False
 
-    # 1) verify?token=... flow
+    # 1) verify token flow (token=...&type=recovery)
     if st.query_params.get("token") and (st.query_params.get("type") or "").lower() == "recovery":
         return maybe_accept_verify_token_session()
 
-    # 2) PKCE code flow
+    # 2) PKCE code flow (?code=...)
     if st.query_params.get("code"):
         return maybe_accept_pkce_code_session()
 
-    # 3) Hash token flow (after bridge)
+    # 3) access_token flow (after hash bridge)
     access_token = st.query_params.get("access_token")
     if access_token:
         sub = jwt_claim(access_token, "sub") or jwt_claim(access_token, "user_id")
-        email = jwt_claim(access_token, "email")
-        # sub MUST be UUID for your DB queries to work
-        set_user({"id": sub, "email": email, "user_metadata": {}}, access_token)
-        st.query_params.clear()
-        st.session_state.pop("auth_mode", None)
-        return True
+        em = jwt_claim(access_token, "email")
+        if sub:
+            set_user({"id": sub, "email": em, "user_metadata": {}}, access_token)
+            st.query_params.clear()
+            st.session_state.pop("auth_mode", None)
+            return True
 
     return False
 
@@ -643,12 +652,12 @@ if maybe_accept_recovery_session():
 def recovery_paste_screen():
     inject_theme("Light")
     st.title("🔑 Password reset")
-    st.caption("Paste the full reset link from your email below.")
+    st.caption("Paste the FULL reset link from your email, then press Continue.")
 
     link = st.text_input("Reset link", key="recovery_paste", placeholder="Paste the full link here…")
     col1, col2 = st.columns(2)
-    go = col1.button("Continue", width="stretch")
-    back = col2.button("Back to login", width="stretch")
+    go = col1.button("Continue", use_container_width=True)
+    back = col2.button("Back to login", use_container_width=True)
 
     if back:
         st.query_params.clear()
@@ -663,22 +672,17 @@ def recovery_paste_screen():
         st.error("Paste the full link from the reset email.")
         st.stop()
 
-    # Extract supported params from pasted link:
-    # - verify?token=...&type=recovery
-    # - ?code=...&type=recovery
-    # - #access_token=...&type=recovery
+    # Parse pasted link and inject into st.query_params
     try:
-        # Query string
+        # Query portion
         if "?" in link:
             qs = link.split("?", 1)[1].split("#", 1)[0]
             for part in qs.split("&"):
                 if "=" not in part:
                     continue
                 k, v = part.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if k in {"code", "type", "token"} and v:
-                    st.query_params["auth"] = "recovery"
+                k, v = k.strip(), v.strip()
+                if k in {"token", "type", "code"} and v:
                     st.query_params[k] = v
 
         # Hash fragment
@@ -688,78 +692,30 @@ def recovery_paste_screen():
                 if "=" not in part:
                     continue
                 k, v = part.split("=", 1)
-                k = k.strip()
-                v = v.strip()
+                k, v = k.strip(), v.strip()
                 if k in {"access_token", "refresh_token", "expires_in", "expires_at", "token_type", "type"} and v:
-                    st.query_params["auth"] = "recovery"
                     st.query_params[k] = v
 
-        # Rerun and let maybe_accept_recovery_session() handle it
-        if st.query_params.get("access_token") or st.query_params.get("code") or st.query_params.get("token"):
-            st.rerun()
+        # Force recovery attempt
+        st.query_params["auth"] = "recovery"
+        st.rerun()
 
     except Exception:
-        pass
-
-    st.error("That link didn’t contain a usable recovery token/code. Request a new reset email and paste it again.")
-    st.stop()
+        st.error("Could not parse that link. Request a new reset email and paste again.")
+        st.stop()
 
 
 # ----------------------------
 # Explicit login required (no auto-restore)
 # ----------------------------
 if (not has_user()) or (not get_token()):
-    qp_auth = (st.query_params.get("auth") or "").lower()
-
-    # ✅ Always show recovery UI when auth=recovery (no rerun loops)
-    if qp_auth == "recovery":
-        inject_theme("Light")
-        st.markdown("### 🔑 Password reset")
-        st.caption("Paste the FULL reset link from your email below, then press Continue.")
-
-        link = st.text_input("Reset link", key="recovery_paste", placeholder="Paste the full link here…")
-
-        c1, c2 = st.columns(2)
-        go = c1.button("Continue", use_container_width=True)
-        back = c2.button("Back to login", use_container_width=True)
-
-        if back:
-            st.query_params.clear()
-            st.session_state["auth_mode"] = "login"
-            st.query_params["auth"] = "login"
-            st.rerun()
-
-        if go:
-            if not link.strip():
-                st.error("Paste the full reset link from the email.")
-                st.stop()
-
-            # Parse ?code=... (PKCE)
-            if "?" in link:
-                qs = link.split("?", 1)[1].split("#", 1)[0]
-                for part in qs.split("&"):
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        if k in {"code", "type", "redirect_to"} and v:
-                            st.query_params[k] = v
-                st.query_params["auth"] = "recovery"
-
-            # Parse #access_token=... (implicit hash)
-            if "#" in link:
-                frag = link.split("#", 1)[1]
-                for part in frag.split("&"):
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        if k in {"access_token", "refresh_token", "expires_in", "expires_at", "token_type", "type"} and v:
-                            st.query_params[k] = v
-                st.query_params["auth"] = "recovery"
-
-            # Now let the normal recovery handler run on rerun
-            st.rerun()
-
+    # If the user is attempting recovery, do NOT show landing/login.
+    if is_recovery_attempt():
+        recovery_paste_screen()
         st.stop()
 
-    # Normal auth routing
+    qp_auth = (st.query_params.get("auth") or "").lower()
+
     if "auth_mode" not in st.session_state:
         st.session_state["auth_mode"] = "landing"
 
@@ -789,11 +745,10 @@ user_id = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict)
 md = getattr(user, "user_metadata", None) or (user.get("user_metadata") if isinstance(user, dict) else {}) or {}
 email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else "")
 
-# Hard guard: if user_id isn't a UUID-like string, force relogin instead of crashing PostgREST
-if not user_id or len(str(user_id)) < 20:
+# Hard guard: if user_id isn't UUID-like, force relogin instead of crashing PostgREST
+if not is_uuid(user_id):
     clear_user()
     st.query_params.clear()
-    st.session_state.pop("reset_lock", None)
     goto_auth("login")
     st.stop()
 
@@ -944,7 +899,7 @@ with st.sidebar:
     st.header(f"👤 {name or 'User'}")
     st.caption(email or "")
 
-    if st.button("Log out", width="stretch"):
+    if st.button("Log out", use_container_width=True):
         clear_user()
         st.query_params.clear()
         goto_auth("landing")
@@ -963,7 +918,7 @@ with st.sidebar:
             key="cur_in",
         )
 
-    if st.button("Save Budget", width="stretch"):
+    if st.button("Save Budget", use_container_width=True):
         update_month(user_id, selected_month, {"budget": float(budget_input), "currency": cur_input})
         st.success("Saved 🔒")
         st.rerun()
@@ -973,7 +928,7 @@ with st.sidebar:
     exp_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt")
     exp_cat = st.selectbox("Category", CATEGORIES, key="exp_cat")
     exp_desc = st.text_input("Description (optional)", key="exp_desc")
-    if st.button("Log Expense", width="stretch"):
+    if st.button("Log Expense", use_container_width=True):
         ok, msg = guard_amount(float(exp_amt))
         if not ok:
             st.error(msg)
@@ -986,7 +941,7 @@ with st.sidebar:
     st.header("💪 Assets")
     a_amt = st.number_input("Add", min_value=0.0, step=1.0, key="a_amt")
     a_note = st.text_input("Note (optional)", key="a_note")
-    if st.button("Stack It", width="stretch"):
+    if st.button("Stack It", use_container_width=True):
         ok, msg = guard_amount(float(a_amt))
         if not ok:
             st.error(msg)
@@ -1080,7 +1035,7 @@ with tab_settings:
     st.markdown("### Settings")
     theme_choice = st.selectbox("Theme", ["Light", "Dark"], index=0 if theme != "Dark" else 1)
 
-    if st.button("Save theme", width="stretch"):
+    if st.button("Save theme", use_container_width=True):
         try:
             jwt = get_token()
             new_md = dict(md) if isinstance(md, dict) else {}
