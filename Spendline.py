@@ -42,7 +42,11 @@ MIN_AMOUNT = 0.01
 MAX_AMOUNT = 1_000_000.0
 
 st.set_page_config(page_title=APP_NAME, layout="centered", initial_sidebar_state="expanded")
-
+# ✅ Quick health-check: if the app can't render this, it's a deploy/build issue (not auth logic)
+if st.query_params.get("ping") == "1":
+    st.title("✅ Spendline ping OK")
+    st.write("The app can render. Any spinner after this is coming from later code (auth/reset/router).")
+    st.stop()
 
 # ---------------------------------------------------------
 # Hash -> Query bridge (required for #access_token reset links)
