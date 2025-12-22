@@ -54,25 +54,32 @@ def hash_to_query_bridge() -> None:
 <script>
 (function () {
   try {
-    // Streamlit components render in an iframe; use parent location.
     const loc = window.parent.location;
+
+    // ✅ Only run bridge while we're actually handling recovery
+    const qp0 = new URLSearchParams(loc.search || "");
+    const authMode = (qp0.get("auth") || "").toLowerCase();
+    const typeQp = (qp0.get("type") || "").toLowerCase();
+
     const hash = loc.hash || "";
     if (!hash || hash.length < 2) return;
 
     const h = hash.startsWith("#") ? hash.slice(1) : hash;
     const hp = new URLSearchParams(h);
 
-    const hasSupabaseTokens =
-      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") ||
-      hp.has("expires_in") || hp.has("expires_at") || hp.has("token_type");
+    const typeHash = (hp.get("type") || "").toLowerCase();
+    const inRecovery = (authMode === "recovery") || (typeQp === "recovery") || (typeHash === "recovery");
 
-    if (!hasSupabaseTokens) return;
+    if (!inRecovery) return;
+
+    const hasTokens = hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in") || hp.has("expires_at");
+    if (!hasTokens) return;
 
     const url = new URL(loc.href);
     const qp = new URLSearchParams(url.search);
 
-    // If already bridged, just remove hash.
-    if (qp.has("access_token") || qp.has("type") || qp.has("code")) {
+    // If already bridged, just remove hash (NO reload loop)
+    if (qp.has("access_token") || qp.has("type")) {
       url.hash = "";
       window.parent.history.replaceState({}, "", url.toString());
       return;
@@ -85,8 +92,12 @@ def hash_to_query_bridge() -> None:
     url.search = qp.toString();
     url.hash = "";
 
-    // Reload so Streamlit sees query params
-    loc.replace(url.toString());
+    // ✅ Only redirect if URL actually changes
+    if (url.toString() !== loc.href) {
+      loc.replace(url.toString());
+    } else {
+      window.parent.history.replaceState({}, "", url.toString());
+    }
   } catch (e) {}
 })();
 </script>
