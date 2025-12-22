@@ -54,12 +54,11 @@ def hash_to_query_bridge() -> None:
 <script>
 (function () {
   try {
+    // Streamlit components run in an iframe — use the real page URL.
     const loc = window.parent.location;
 
-    // ✅ Only run bridge while we're actually handling recovery
-    const qp0 = new URLSearchParams(loc.search || "");
-    const authMode = (qp0.get("auth") || "").toLowerCase();
-    const typeQp = (qp0.get("type") || "").toLowerCase();
+    // ✅ Prevent redirect loops (run only once per page load session)
+    if (window.sessionStorage.getItem("SL_HASH_BRIDGED") === "1") return;
 
     const hash = loc.hash || "";
     if (!hash || hash.length < 2) return;
@@ -67,19 +66,20 @@ def hash_to_query_bridge() -> None:
     const h = hash.startsWith("#") ? hash.slice(1) : hash;
     const hp = new URLSearchParams(h);
 
-    const typeHash = (hp.get("type") || "").toLowerCase();
-    const inRecovery = (authMode === "recovery") || (typeQp === "recovery") || (typeHash === "recovery");
+    // Only act on Supabase auth fragments
+    const hasSupabaseTokens =
+      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") ||
+      hp.has("expires_in") || hp.has("expires_at") || hp.has("token_type") ||
+      hp.has("code");
 
-    if (!inRecovery) return;
-
-    const hasTokens = hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in") || hp.has("expires_at");
-    if (!hasTokens) return;
+    if (!hasSupabaseTokens) return;
 
     const url = new URL(loc.href);
     const qp = new URLSearchParams(url.search);
 
-    // If already bridged, just remove hash (NO reload loop)
-    if (qp.has("access_token") || qp.has("type")) {
+    // If already bridged, just remove hash and stop.
+    if (qp.has("access_token") || qp.has("code") || qp.get("type") === "recovery") {
+      window.sessionStorage.setItem("SL_HASH_BRIDGED", "1");
       url.hash = "";
       window.parent.history.replaceState({}, "", url.toString());
       return;
@@ -92,12 +92,10 @@ def hash_to_query_bridge() -> None:
     url.search = qp.toString();
     url.hash = "";
 
-    // ✅ Only redirect if URL actually changes
-    if (url.toString() !== loc.href) {
-      loc.replace(url.toString());
-    } else {
-      window.parent.history.replaceState({}, "", url.toString());
-    }
+    window.sessionStorage.setItem("SL_HASH_BRIDGED", "1");
+
+    // Reload once so Streamlit sees query params
+    loc.replace(url.toString());
   } catch (e) {}
 })();
 </script>
