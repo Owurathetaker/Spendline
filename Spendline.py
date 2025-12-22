@@ -1,18 +1,26 @@
-#DEPLOY_MARKER: 2025-12-21 v2.3.3
-import time
-import base64
-import json
-from datetime import datetime, date
-from typing import Any, Callable, Optional
-import httpx
+#DEPLOY_MARKER: 2025-12-22 v2.3.3
 
 import streamlit as st
+
+st.set_page_config(page_title="Spendline", layout="centered", initial_sidebar_state="expanded")
+
+# ✅ This must run BEFORE any other imports (to prove imports aren't hanging)
+if st.query_params.get("ping") == "1":
+    st.title("✅ Spendline ping OK")
+    st.write("Ping reached BEFORE heavy imports.")
+    st.stop()
+
+# ---- heavy imports AFTER ping ----
+import time
+from datetime import datetime, date
+from typing import Any, Callable, Optional
+
 import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 
 from postgrest import SyncPostgrestClient
-from supabase_auth import SyncGoTrueClient
+from supabase_auth import SyncGoTrueClientss
 
 # =========================================================
 # Spendline.py
