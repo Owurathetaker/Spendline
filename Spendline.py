@@ -4,6 +4,12 @@ import streamlit as st
 
 st.set_page_config(page_title="Spendline", layout="centered", initial_sidebar_state="expanded")
 
+# --- QUICK PING (diagnose infinite loops) ---
+if st.query_params.get("ping") == "1":
+    st.title("✅ Spendline.py is running")
+    st.write("Query params:", dict(st.query_params))
+    st.stop()
+    
 # ✅ This must run BEFORE any other imports (to prove imports aren't hanging)
 if st.query_params.get("ping") == "1":
     st.title("✅ Spendline ping OK")
