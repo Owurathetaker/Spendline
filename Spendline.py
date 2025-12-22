@@ -54,11 +54,11 @@ def hash_to_query_bridge() -> None:
 <script>
 (function () {
   try {
-    // Streamlit components run in an iframe — use the real page URL.
     const loc = window.parent.location;
 
-    // ✅ Prevent redirect loops (run only once per page load session)
-    if (window.sessionStorage.getItem("SL_HASH_BRIDGED") === "1") return;
+    // ✅ If we've already bridged once, never do it again.
+    const url0 = new URL(loc.href);
+    if (url0.searchParams.get("bridged") === "1") return;
 
     const hash = loc.hash || "";
     if (!hash || hash.length < 2) return;
@@ -66,35 +66,25 @@ def hash_to_query_bridge() -> None:
     const h = hash.startsWith("#") ? hash.slice(1) : hash;
     const hp = new URLSearchParams(h);
 
-    // Only act on Supabase auth fragments
     const hasSupabaseTokens =
-      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") ||
-      hp.has("expires_in") || hp.has("expires_at") || hp.has("token_type") ||
-      hp.has("code");
+      hp.has("access_token") || hp.has("refresh_token") || hp.has("type") || hp.has("expires_in");
 
     if (!hasSupabaseTokens) return;
 
     const url = new URL(loc.href);
     const qp = new URLSearchParams(url.search);
 
-    // If already bridged, just remove hash and stop.
-    if (qp.has("access_token") || qp.has("code") || qp.get("type") === "recovery") {
-      window.sessionStorage.setItem("SL_HASH_BRIDGED", "1");
-      url.hash = "";
-      window.parent.history.replaceState({}, "", url.toString());
-      return;
-    }
-
+    // Move hash params -> query params
     for (const [k, v] of hp.entries()) {
       if (!qp.has(k)) qp.set(k, v);
     }
 
+    // ✅ Add marker so we don't loop
+    qp.set("bridged", "1");
+
     url.search = qp.toString();
     url.hash = "";
 
-    window.sessionStorage.setItem("SL_HASH_BRIDGED", "1");
-
-    // Reload once so Streamlit sees query params
     loc.replace(url.toString());
   } catch (e) {}
 })();
