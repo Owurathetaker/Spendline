@@ -700,14 +700,58 @@ def recovery_paste_screen():
 # ----------------------------
 # Explicit login required (no auto-restore)
 # ----------------------------
-if (not has_user() or not get_token()) and not st.session_state.get("reset_lock"):
+if (not has_user()) or (not get_token()):
     qp_auth = (st.query_params.get("auth") or "").lower()
 
-    # If user is on recovery route, do NOT show landing/login. Show paste screen instead.
-    if qp_auth == "recovery" or (st.query_params.get("type") or "").lower() == "recovery":
-        recovery_paste_screen()
+    # ✅ Always show recovery UI when auth=recovery (no rerun loops)
+    if qp_auth == "recovery":
+        inject_theme("Light")
+        st.markdown("### 🔑 Password reset")
+        st.caption("Paste the FULL reset link from your email below, then press Continue.")
+
+        link = st.text_input("Reset link", key="recovery_paste", placeholder="Paste the full link here…")
+
+        c1, c2 = st.columns(2)
+        go = c1.button("Continue", use_container_width=True)
+        back = c2.button("Back to login", use_container_width=True)
+
+        if back:
+            st.query_params.clear()
+            st.session_state["auth_mode"] = "login"
+            st.query_params["auth"] = "login"
+            st.rerun()
+
+        if go:
+            if not link.strip():
+                st.error("Paste the full reset link from the email.")
+                st.stop()
+
+            # Parse ?code=... (PKCE)
+            if "?" in link:
+                qs = link.split("?", 1)[1].split("#", 1)[0]
+                for part in qs.split("&"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k in {"code", "type", "redirect_to"} and v:
+                            st.query_params[k] = v
+                st.query_params["auth"] = "recovery"
+
+            # Parse #access_token=... (implicit hash)
+            if "#" in link:
+                frag = link.split("#", 1)[1]
+                for part in frag.split("&"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k in {"access_token", "refresh_token", "expires_in", "expires_at", "token_type", "type"} and v:
+                            st.query_params[k] = v
+                st.query_params["auth"] = "recovery"
+
+            # Now let the normal recovery handler run on rerun
+            st.rerun()
+
         st.stop()
 
+    # Normal auth routing
     if "auth_mode" not in st.session_state:
         st.session_state["auth_mode"] = "landing"
 
