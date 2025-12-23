@@ -6,6 +6,8 @@ import base64
 from datetime import datetime, date
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse, parse_qs
+import httpx
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 import streamlit as st
@@ -595,60 +597,177 @@ def exchange_verify_link_for_access_token(verify_link: str) -> Optional[str]:
 
     return None
 
+from urllib.parse import urlparse, parse_qs
+import httpx
+
 # ----------------------------
-# Recovery paste screen (THIS is your current pain point)
+# Recovery paste screen (FIXED)
 # ----------------------------
 def recovery_paste_screen():
     inject_theme("Light")
     st.title("🔑 Password reset")
     st.caption("Paste the FULL reset link from your email, then Continue.")
 
-    link = st.text_input("Reset link", key="recovery_paste", placeholder="Paste the full link here…")
+    link = st.text_input(
+        "Reset link",
+        key="recovery_paste",
+        placeholder="Paste the full link here…"
+    )
     c1, c2 = st.columns(2)
     go = c1.button("Continue", use_container_width=True)
     back = c2.button("Back to login", use_container_width=True)
 
     if back:
         st.session_state.pop("pw_reset_done", None)
+        clear_user()
         st.query_params.clear()
         st.session_state["auth_mode"] = "login"
+        st.query_params["auth"] = "login"
         st.rerun()
 
     if not go:
         st.stop()
 
-    if not link.strip():
+    link = (link or "").strip()
+    if not link:
         st.error("Paste the full reset link from the email.")
         st.stop()
 
+    def accept_access_token(at: str) -> bool:
+        at = (at or "").strip()
+        if not at:
+            return False
+
+        sub = jwt_claim(at, "sub") or jwt_claim(at, "user_id")
+        email_claim = jwt_claim(at, "email")
+
+        # sub MUST be a real UUID-like string for your DB/RLS queries
+        if not sub or len(str(sub)) < 20:
+            return False
+
+        set_user({"id": sub, "email": email_claim, "user_metadata": {}}, at)
+        st.session_state.pop("auth_mode", None)
+        return True
+
+    def accept_pkce_code(code: str) -> bool:
+        code = (code or "").strip()
+        if not code:
+            return False
+        try:
+            try:
+                resp = auth.exchange_code_for_session(code)
+            except Exception:
+                resp = auth.exchange_code_for_session({"auth_code": code})
+
+            user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+            session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
+
+            token = None
+            if session:
+                token = getattr(session, "access_token", None) or (session.get("access_token") if isinstance(session, dict) else None)
+
+            if user and token:
+                set_user(user, token)
+                st.session_state.pop("auth_mode", None)
+                return True
+        except Exception:
+            return False
+        return False
+
+    def exchange_verify_link_for_access_token(verify_url: str) -> Optional[str]:
+        """
+        Supabase reset emails often look like:
+          https://<project>.supabase.co/auth/v1/verify?token=...&type=recovery&redirect_to=...
+        That verify endpoint usually responds with redirects that end at your redirect_to
+        with either:
+          - #access_token=...&type=recovery
+          - or ?code=... (PKCE)
+        We follow redirects and extract tokens from the final URL.
+        """
+        try:
+            # Follow up to N redirects manually (some setups block automatic follow)
+            current = verify_url
+            with httpx.Client(follow_redirects=False, timeout=20.0) as client:
+                for _ in range(10):
+                    r = client.get(current)
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        loc = r.headers.get("location") or r.headers.get("Location")
+                        if not loc:
+                            break
+
+                        # Handle relative redirects
+                        if loc.startswith("/"):
+                            base = urlparse(current)
+                            loc = f"{base.scheme}://{base.netloc}{loc}"
+
+                        current = loc
+                        continue
+
+                    # Not a redirect anymore; use the last URL we have
+                    break
+
+            # The token/code is usually in the last redirect URL we landed on (current)
+            u = urlparse(current)
+
+            # A) Hash token flow
+            if u.fragment and "access_token=" in u.fragment:
+                frag = u.fragment
+                parts = [p for p in frag.split("&") if "=" in p]
+                hp = dict(p.split("=", 1) for p in parts)
+                return hp.get("access_token")
+
+            # B) PKCE code flow (some projects)
+            qs = parse_qs(u.query)
+            code = (qs.get("code") or [None])[0]
+            if code:
+                # We’ll handle code in the caller
+                return None
+
+        except Exception:
+            return None
+
+        return None
+
     with st.spinner("Processing reset link…"):
         try:
-            u = urlparse(link.strip())
+            u = urlparse(link)
             qs = parse_qs(u.query)
 
-            # A) Supabase verify link (MOST COMMON for reset emails)
-            #    /auth/v1/verify?token=...&type=recovery&redirect_to=...
+            # 1) MOST COMMON: Supabase verify link
             vtoken = (qs.get("token") or [None])[0]
             vtype = ((qs.get("type") or [None])[0] or "").lower()
             if vtoken and vtype == "recovery" and "/auth/v1/verify" in link:
-                at = exchange_verify_link_for_access_token(link.strip())
+                at = exchange_verify_link_for_access_token(link)
                 if at and accept_access_token(at):
                     recovery_reset_password_screen()
                     st.stop()
-                st.error("Couldn’t exchange verify link into a recovery session. Request a new reset email and try again.")
+
+                # If it redirected to a PKCE code instead, try to pull it from redirect_to quickly
+                # (Sometimes the verify redirect target includes ?code=...)
+                # We do a light parse of redirect_to itself if present:
+                rto = (qs.get("redirect_to") or [None])[0]
+                if rto:
+                    rtu = urlparse(rto)
+                    rqs = parse_qs(rtu.query)
+                    code = (rqs.get("code") or [None])[0]
+                    if code and accept_pkce_code(code):
+                        recovery_reset_password_screen()
+                        st.stop()
+
+                st.error("Couldn’t open this reset link. Request a NEW reset email and try again.")
                 st.stop()
 
-            # B) PKCE link (?code=...)
+            # 2) PKCE link pasted directly (?code=...)
             code = (qs.get("code") or [None])[0]
-            if code:
-                if accept_pkce_code(code):
-                    recovery_reset_password_screen()
-                    st.stop()
+            if code and accept_pkce_code(code):
+                recovery_reset_password_screen()
+                st.stop()
 
-            # C) Hash link (#access_token=...) pasted directly
+            # 3) Hash link pasted directly (#access_token=...)
             frag = u.fragment or ""
             if frag and "access_token=" in frag:
-                hp = dict([p.split("=", 1) for p in frag.split("&") if "=" in p])
+                parts = [p for p in frag.split("&") if "=" in p]
+                hp = dict(p.split("=", 1) for p in parts)
                 at = hp.get("access_token")
                 if at and accept_access_token(at):
                     recovery_reset_password_screen()
