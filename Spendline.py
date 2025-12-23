@@ -555,6 +555,45 @@ def forgot_password_view():
         except Exception as e:
             st.error(f"Couldn’t send reset email: {e}")
 
+from urllib.parse import urlparse, parse_qs
+
+def exchange_verify_link_for_access_token(verify_link: str) -> Optional[str]:
+    """
+    Supabase reset emails often contain:
+      https://<project>.supabase.co/auth/v1/verify?token=...&type=recovery&redirect_to=...
+    This endpoint redirects to redirect_to with a hash like:
+      ...#access_token=...&refresh_token=...&type=recovery...
+    We fetch the verify URL and pull the access_token from the redirect Location.
+    """
+    try:
+        # Some environments require apikey header; harmless if not required.
+        headers = {"apikey": SUPABASE_ANON_KEY}
+
+        # Don’t follow redirects automatically; we want Location headers.
+        r = httpx.get(verify_link, headers=headers, follow_redirects=False, timeout=20.0)
+
+        # Follow up to a few redirects manually
+        for _ in range(5):
+            loc = r.headers.get("location") or r.headers.get("Location")
+            if not loc:
+                break
+
+            # Supabase returns tokens in the hash fragment
+            u = urlparse(loc)
+            frag = u.fragment or ""
+            if "access_token=" in frag:
+                hp = dict([p.split("=", 1) for p in frag.split("&") if "=" in p])
+                at = hp.get("access_token")
+                if at and len(at) > 50:   # real JWTs are long
+                    return at
+
+            # keep following redirects
+            r = httpx.get(loc, headers=headers, follow_redirects=False, timeout=20.0)
+
+    except Exception:
+        return None
+
+    return None
 
 # ----------------------------
 # Recovery paste screen (THIS is your current pain point)
@@ -582,31 +621,33 @@ def recovery_paste_screen():
         st.error("Paste the full reset link from the email.")
         st.stop()
 
-    st.info("Processing link…")
-    with st.spinner("Opening recovery session…"):
+    with st.spinner("Processing reset link…"):
         try:
-            # Parse URL
             u = urlparse(link.strip())
             qs = parse_qs(u.query)
 
-            # 1) verify?token=...&type=recovery
+            # A) Supabase verify link (MOST COMMON for reset emails)
+            #    /auth/v1/verify?token=...&type=recovery&redirect_to=...
             vtoken = (qs.get("token") or [None])[0]
             vtype = ((qs.get("type") or [None])[0] or "").lower()
-            if vtoken and vtype == "recovery":
-                if accept_verify_token(vtoken, "recovery"):
+            if vtoken and vtype == "recovery" and "/auth/v1/verify" in link:
+                at = exchange_verify_link_for_access_token(link.strip())
+                if at and accept_access_token(at):
                     recovery_reset_password_screen()
                     st.stop()
+                st.error("Couldn’t exchange verify link into a recovery session. Request a new reset email and try again.")
+                st.stop()
 
-            # 2) PKCE ?code=...
+            # B) PKCE link (?code=...)
             code = (qs.get("code") or [None])[0]
             if code:
                 if accept_pkce_code(code):
                     recovery_reset_password_screen()
                     st.stop()
 
-            # 3) Hash #access_token=...
+            # C) Hash link (#access_token=...) pasted directly
             frag = u.fragment or ""
-            if frag:
+            if frag and "access_token=" in frag:
                 hp = dict([p.split("=", 1) for p in frag.split("&") if "=" in p])
                 at = hp.get("access_token")
                 if at and accept_access_token(at):
