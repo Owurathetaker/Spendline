@@ -1,12 +1,12 @@
 export default function Home() {
   return (
-    <main style={{ padding: 40 }}>
-      <h1>Spendline</h1>
-      <p>Supabase env check:</p>
-      <ul>
-        <li>URL: {process.env.NEXT_PUBLIC_SUPABASE_URL ? "OK" : "MISSING"}</li>
-        <li>ANON KEY: {process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? "OK" : "MISSING"}</li>
-      </ul>
+    <main style={{ padding: 24 }}>
+      <h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Spendline</h1>
+      <p style={{ opacity: 0.8 }}>App is live ✅</p>
+
+      <div style={{ marginTop: 16 }}>
+        <a href="/login">Go to Login →</a>
+      </div>
     </main>
   );
 }
