@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 type MonthRow = {
   id: number;
   user_id: string;
-  month: string;
-  currency: string;
+  month: string; // "YYYY-MM"
+  currency: string | null;
   budget: number | null;
   assets: number | null;
   liabilities: number | null;
@@ -19,426 +19,322 @@ type ExpenseRow = {
   user_id: string;
   month: string;
   amount: number;
-  category: string;
+  category: string | null;
   description: string | null;
-  occurred_at: string;
+  occurred_at: string | null;
 };
 
-type AssetEventRow = {
+type AssetRow = {
   id: number;
   user_id: string;
   month: string;
   amount: number;
   note: string | null;
-  created_at: string;
+  created_at: string | null;
 };
 
-const CATEGORIES = [
-  "Food & Dining",
-  "Transport",
-  "Entertainment",
-  "Shopping",
-  "Bills & Utilities",
-  "Health",
-  "Subscriptions",
-  "Other",
-];
-
-const CURRENCIES: Record<string, string> = {
-  USD: "$",
-  GHS: "₵",
-  EUR: "€",
-  GBP: "£",
-  NGN: "₦",
-};
-
-function monthKey(d = new Date()) {
+function ymNow() {
+  const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   return `${y}-${m}`;
 }
 
-function money(amount: number, code: string) {
-  const s = CURRENCIES[code] ?? "$";
-  return `${s}${amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 export default function DashboardPage() {
-  const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
   const [loading, setLoading] = useState(true);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [email, setEmail] = useState<string>("");
+  const [month, setMonth] = useState<string>(ymNow());
 
-  const [month, setMonth] = useState(monthKey());
-  const [currency, setCurrency] = useState<keyof typeof CURRENCIES>("GHS");
-  const [budget, setBudget] = useState<number>(0);
-
+  const [monthRow, setMonthRow] = useState<MonthRow | null>(null);
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
-  const [assets, setAssets] = useState<AssetEventRow[]>([]);
+  const [assets, setAssets] = useState<AssetRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  const [expAmount, setExpAmount] = useState<number>(0);
-  const [expCategory, setExpCategory] = useState(CATEGORIES[0]);
-  const [expDesc, setExpDesc] = useState("");
+  const spentTotal = useMemo(
+    () => expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0),
+    [expenses]
+  );
+  const assetsTotal = useMemo(
+    () => assets.reduce((s, a) => s + (Number(a.amount) || 0), 0),
+    [assets]
+  );
 
-  const [assetAmount, setAssetAmount] = useState<number>(0);
-  const [assetNote, setAssetNote] = useState("");
+  const budget = Number(monthRow?.budget || 0);
+  const liabilities = Number(monthRow?.liabilities || 0);
+  const remaining = budget - spentTotal;
+  const netWorth = assetsTotal - liabilities;
 
-  const [msg, setMsg] = useState<string | null>(null);
+  const currency = (monthRow?.currency || "GHS").toUpperCase();
 
-  const spent = useMemo(() => expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0), [expenses]);
-  const assetsTotal = useMemo(() => assets.reduce((s, a) => s + (Number(a.amount) || 0), 0), [assets]);
-  const remaining = useMemo(() => (Number(budget) || 0) - spent, [budget, spent]);
+  const progressPct = useMemo(() => {
+    if (budget <= 0) return 0;
+    const pct = Math.round((spentTotal / budget) * 100);
+    return Math.max(0, Math.min(100, pct));
+  }, [spentTotal, budget]);
 
-  async function loadAll(uid: string, m: string) {
-    setMsg(null);
+  async function load() {
     setLoading(true);
+    setError(null);
 
-    // Ensure month row exists
-    const { data: existing, error: selErr } = await supabase
-      .from("months")
-      .select("*")
-      .eq("user_id", uid)
-      .eq("month", m)
-      .maybeSingle();
+    try {
+      const { data: userData, error: userErr } = await supabase.auth.getUser();
+      if (userErr || !userData?.user) {
+        window.location.href = "/login";
+        return;
+      }
+      setEmail(userData.user.email || "");
 
-    if (selErr) {
-      setLoading(false);
-      setMsg(`months select error: ${selErr.message}`);
-      return;
-    }
-
-    let monthRow: MonthRow | null = existing as MonthRow | null;
-
-    if (!monthRow) {
-      const { data: inserted, error: insErr } = await supabase
+      // month row
+      const mr = await supabase
         .from("months")
-        .insert({
-          user_id: uid,
-          month: m,
-          currency: "GHS",
-          budget: 0,
-          assets: 0,
-          liabilities: 0,
-        })
-        .select("*")
+        .select("id,user_id,month,currency,budget,assets,liabilities")
+        .eq("month", month)
         .single();
 
-      if (insErr) {
-        setLoading(false);
-        setMsg(`months insert error: ${insErr.message}`);
-        return;
+      if (mr.error) {
+        // if row missing, create a default row
+        if (mr.error.code === "PGRST116") {
+          const ins = await supabase
+            .from("months")
+            .insert({
+              month,
+              currency: "GHS",
+              budget: 0,
+              assets: 0,
+              liabilities: 0,
+            })
+            .select("id,user_id,month,currency,budget,assets,liabilities")
+            .single();
+
+          if (ins.error) throw ins.error;
+          setMonthRow(ins.data as MonthRow);
+        } else {
+          throw mr.error;
+        }
+      } else {
+        setMonthRow(mr.data as MonthRow);
       }
 
-      monthRow = inserted as MonthRow;
-    }
+      const ex = await supabase
+        .from("expenses")
+        .select("id,user_id,month,amount,category,description,occurred_at")
+        .eq("month", month)
+        .order("occurred_at", { ascending: false })
+        .limit(50);
 
-    setCurrency((monthRow.currency as any) || "GHS");
-    setBudget(Number(monthRow.budget || 0));
+      if (ex.error) throw ex.error;
+      setExpenses((ex.data || []) as ExpenseRow[]);
 
-    // Expenses
-    const { data: exp, error: expErr } = await supabase
-      .from("expenses")
-      .select("*")
-      .eq("user_id", uid)
-      .eq("month", m)
-      .order("occurred_at", { ascending: false })
-      .limit(200);
+      const as = await supabase
+        .from("asset_events")
+        .select("id,user_id,month,amount,note,created_at")
+        .eq("month", month)
+        .order("created_at", { ascending: false })
+        .limit(50);
 
-    if (expErr) {
+      if (as.error) throw as.error;
+      setAssets((as.data || []) as AssetRow[]);
+    } catch (e: any) {
+      setError(e?.message || "Something went wrong.");
+    } finally {
       setLoading(false);
-      setMsg(`expenses select error: ${expErr.message}`);
-      return;
     }
-
-    // Assets events
-    const { data: asEv, error: asErr } = await supabase
-      .from("asset_events")
-      .select("*")
-      .eq("user_id", uid)
-      .eq("month", m)
-      .order("created_at", { ascending: false })
-      .limit(200);
-
-    if (asErr) {
-      setLoading(false);
-      setMsg(`asset_events select error: ${asErr.message}`);
-      return;
-    }
-
-    setExpenses((exp || []) as ExpenseRow[]);
-    setAssets((asEv || []) as AssetEventRow[]);
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.auth.getUser();
-      if (error || !data?.user) {
-        router.push("/login");
-        return;
-      }
-      const uid = data.user.id;
-      setUserId(uid);
-      await loadAll(uid, month);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (userId) loadAll(userId, month);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month]);
-
-  async function saveBudget() {
-    if (!userId) return;
-    setMsg(null);
-    const { error } = await supabase
-      .from("months")
-      .update({ budget: Number(budget) || 0, currency })
-      .eq("user_id", userId)
-      .eq("month", month);
-
-    if (error) {
-      setMsg(`Save budget failed: ${error.message}`);
-      return;
-    }
-    await loadAll(userId, month);
-  }
-
-  async function addExpense() {
-    if (!userId) return;
-    setMsg(null);
-
-    const amt = Number(expAmount) || 0;
-    if (amt <= 0) {
-      setMsg("Expense amount must be > 0");
-      return;
-    }
-
-    const { error } = await supabase.from("expenses").insert({
-      user_id: userId,
-      month,
-      amount: amt,
-      category: expCategory,
-      description: expDesc.trim() || null,
-      occurred_at: new Date().toISOString(),
-    });
-
-    if (error) {
-      setMsg(`Add expense failed: ${error.message}`);
-      return;
-    }
-
-    setExpAmount(0);
-    setExpDesc("");
-    await loadAll(userId, month);
-  }
-
-  async function deleteExpense(id: number) {
-    setMsg(null);
-    const { error } = await supabase.from("expenses").delete().eq("id", id);
-    if (error) {
-      setMsg(`Delete expense failed: ${error.message}`);
-      return;
-    }
-    if (userId) await loadAll(userId, month);
-  }
-
-  async function addAsset() {
-    if (!userId) return;
-    setMsg(null);
-
-    const amt = Number(assetAmount) || 0;
-    if (amt <= 0) {
-      setMsg("Asset amount must be > 0");
-      return;
-    }
-
-    const { error } = await supabase.from("asset_events").insert({
-      user_id: userId,
-      month,
-      amount: amt,
-      note: assetNote.trim() || null,
-      created_at: new Date().toISOString(),
-    });
-
-    if (error) {
-      setMsg(`Add asset failed: ${error.message}`);
-      return;
-    }
-
-    setAssetAmount(0);
-    setAssetNote("");
-    await loadAll(userId, month);
-  }
-
-  async function deleteAsset(id: number) {
-    setMsg(null);
-    const { error } = await supabase.from("asset_events").delete().eq("id", id);
-    if (error) {
-      setMsg(`Delete asset failed: ${error.message}`);
-      return;
-    }
-    if (userId) await loadAll(userId, month);
   }
 
   async function logout() {
     await supabase.auth.signOut();
-    router.push("/login");
+    window.location.href = "/login";
   }
 
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month]);
+
   return (
-    <main style={{ maxWidth: 960, margin: "36px auto", padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Spendline</h1>
-          <p style={{ opacity: 0.7, marginTop: 6 }}>Simple monthly budget + expenses + assets.</p>
+    <main className="min-h-screen bg-white text-slate-900">
+      <div className="mx-auto max-w-5xl px-4 py-8">
+        {/* Header */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-extrabold tracking-tight">Spendline</h1>
+            <p className="text-sm text-slate-500">
+              Quiet money control — track what leaves, stack what stays.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <p className="text-xs text-slate-500">Signed in</p>
+              <p className="text-sm font-semibold">{email || "—"}</p>
+            </div>
+            <button
+              onClick={logout}
+              className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold hover:bg-slate-50"
+            >
+              Log out
+            </button>
+          </div>
         </div>
-        <button onClick={logout} style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #ddd" }}>
-          Log out
-        </button>
-      </div>
 
-      <hr style={{ margin: "18px 0", opacity: 0.2 }} />
+        {/* Month picker */}
+        <div className="mt-6 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div>
+            <p className="text-xs text-slate-500">Month</p>
+            <p className="text-sm font-semibold">{month}</p>
+          </div>
 
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
-        <div style={{ display: "grid", gap: 6 }}>
-          <label style={{ fontSize: 12, opacity: 0.7 }}>Month</label>
           <input
+            type="month"
             value={month}
             onChange={(e) => setMonth(e.target.value)}
-            placeholder="YYYY-MM"
-            style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd", width: 140 }}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
           />
         </div>
 
-        <div style={{ display: "grid", gap: 6 }}>
-          <label style={{ fontSize: 12, opacity: 0.7 }}>Currency</label>
-          <select
-            value={currency}
-            onChange={(e) => setCurrency(e.target.value as any)}
-            style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd", width: 140 }}
-          >
-            {Object.keys(CURRENCIES).map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ display: "grid", gap: 6, flex: 1, minWidth: 220 }}>
-          <label style={{ fontSize: 12, opacity: 0.7 }}>Monthly budget</label>
-          <input
-            value={budget}
-            onChange={(e) => setBudget(Number(e.target.value))}
-            type="number"
-            min={0}
-            style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-          />
-        </div>
-
-        <button
-          onClick={saveBudget}
-          style={{ padding: "10px 14px", borderRadius: 10, border: "none", fontWeight: 800, cursor: "pointer" }}
-        >
-          Save
-        </button>
-      </div>
-
-      {msg && <p style={{ marginTop: 12, color: "crimson" }}>{msg}</p>}
-      {loading && <p style={{ marginTop: 12, opacity: 0.7 }}>Loading…</p>}
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginTop: 18 }}>
-        <Card title="Budget" value={money(Number(budget) || 0, currency)} />
-        <Card title="Spent" value={money(spent, currency)} />
-        <Card title="Remaining" value={money(remaining, currency)} />
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, marginTop: 20 }}>
-        <section style={panelStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 900 }}>Log expense</h2>
-          <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-            <input
-              value={expAmount}
-              onChange={(e) => setExpAmount(Number(e.target.value))}
-              type="number"
-              min={0}
-              placeholder="Amount"
-              style={inputStyle}
-            />
-            <select value={expCategory} onChange={(e) => setExpCategory(e.target.value)} style={inputStyle}>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-            <input value={expDesc} onChange={(e) => setExpDesc(e.target.value)} placeholder="Description (optional)" style={inputStyle} />
-            <button onClick={addExpense} style={primaryBtn}>
-              Add expense
-            </button>
+        {/* Loading / error */}
+        {loading && (
+          <div className="mt-6 rounded-2xl border border-slate-200 p-4">
+            <p className="text-sm text-slate-600">Loading dashboard…</p>
           </div>
-        </section>
+        )}
 
-        <section style={panelStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 900 }}>Stack assets</h2>
-          <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-            <input
-              value={assetAmount}
-              onChange={(e) => setAssetAmount(Number(e.target.value))}
-              type="number"
-              min={0}
-              placeholder="Amount"
-              style={inputStyle}
-            />
-            <input value={assetNote} onChange={(e) => setAssetNote(e.target.value)} placeholder="Note (optional)" style={inputStyle} />
-            <button onClick={addAsset} style={primaryBtn}>
-              Add asset
-            </button>
+        {!loading && error && (
+          <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4">
+            <p className="text-sm font-semibold text-red-700">Error</p>
+            <p className="mt-1 text-sm text-red-700">{error}</p>
           </div>
-        </section>
-      </div>
+        )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, marginTop: 16 }}>
-        <section style={panelStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 900 }}>Recent expenses</h2>
-          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-            {expenses.length === 0 ? (
-              <p style={{ opacity: 0.7 }}>No expenses yet.</p>
-            ) : (
-              expenses.slice(0, 12).map((e) => (
-                <Row
-                  key={e.id}
-                  left={`${e.category}${e.description ? " • " + e.description : ""}`}
-                  right={money(Number(e.amount) || 0, currency)}
-                  meta={(e.occurred_at || "").slice(0, 10)}
-                  onDelete={() => deleteExpense(e.id)}
-                />
-              ))
-            )}
-          </div>
-        </section>
+        {!loading && !error && (
+          <>
+            {/* Overview cards */}
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Card title="Budget" value={`${currency} ${budget.toLocaleString()}`} />
+              <Card title="Spent" value={`${currency} ${spentTotal.toLocaleString()}`} />
+              <Card title="Remaining" value={`${currency} ${remaining.toLocaleString()}`} />
+              <Card title="Net Worth" value={`${currency} ${netWorth.toLocaleString()}`} />
+            </div>
 
-        <section style={panelStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 900 }}>Recent assets</h2>
-          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-            {assets.length === 0 ? (
-              <p style={{ opacity: 0.7 }}>No assets yet.</p>
-            ) : (
-              assets.slice(0, 12).map((a) => (
-                <Row
-                  key={a.id}
-                  left={a.note || "Asset add"}
-                  right={money(Number(a.amount) || 0, currency)}
-                  meta={(a.created_at || "").slice(0, 10)}
-                  onDelete={() => deleteAsset(a.id)}
-                />
-              ))
-            )}
-          </div>
-        </section>
+            {/* Progress + milestones */}
+            <div className="mt-6 grid gap-4 lg:grid-cols-3">
+              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-bold">Monthly Budget Progress</p>
+                  <p className="text-sm text-slate-600">{progressPct}%</p>
+                </div>
+                <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
+                  <div
+                    className="h-3 rounded-full bg-emerald-500"
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+                <p className="mt-3 text-xs text-slate-500">
+                  Next: we’ll add saving goals + reward milestones here.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-bold">Achievements</p>
+                <ul className="mt-3 space-y-2 text-sm text-slate-700">
+                  <li className="flex items-center justify-between">
+                    <span>✅ First login</span>
+                    <span className="text-xs text-slate-500">Unlocked</span>
+                  </li>
+                  <li className="flex items-center justify-between">
+                    <span>🏁 Track 5 expenses</span>
+                    <span className="text-xs text-slate-500">Soon</span>
+                  </li>
+                  <li className="flex items-center justify-between">
+                    <span>💪 Add first asset</span>
+                    <span className="text-xs text-slate-500">Soon</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            {/* Tables */}
+            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-bold">Recent expenses</p>
+                {expenses.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500">No expenses yet.</p>
+                ) : (
+                  <ul className="mt-3 space-y-2">
+                    {expenses.slice(0, 10).map((e) => (
+                      <li
+                        key={e.id}
+                        className="flex items-start justify-between rounded-xl border border-slate-200 px-3 py-2"
+                      >
+                        <div>
+                          <p className="text-sm font-semibold">
+                            {(e.category || "Other").toUpperCase()}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {e.description || "—"}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold">
+                            {currency} {Number(e.amount).toLocaleString()}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {(e.occurred_at || "").slice(0, 10)}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-bold">Recent assets</p>
+                {assets.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500">No assets yet.</p>
+                ) : (
+                  <ul className="mt-3 space-y-2">
+                    {assets.slice(0, 10).map((a) => (
+                      <li
+                        key={a.id}
+                        className="flex items-start justify-between rounded-xl border border-slate-200 px-3 py-2"
+                      >
+                        <div>
+                          <p className="text-sm font-semibold">ASSET</p>
+                          <p className="text-xs text-slate-500">{a.note || "—"}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold">
+                            {currency} {Number(a.amount).toLocaleString()}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {(a.created_at || "").slice(0, 10)}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="mt-10 text-center text-xs text-slate-500">
+              <p>
+                Need to test auth?{" "}
+                <Link className="underline" href="/login">
+                  Login
+                </Link>{" "}
+                •{" "}
+                <Link className="underline" href="/signup">
+                  Signup
+                </Link>
+              </p>
+            </div>
+          </>
+        )}
       </div>
     </main>
   );
@@ -446,64 +342,9 @@ export default function DashboardPage() {
 
 function Card({ title, value }: { title: string; value: string }) {
   return (
-    <div style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14 }}>
-      <div style={{ fontSize: 12, opacity: 0.7 }}>{title}</div>
-      <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{value}</div>
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <p className="text-xs text-slate-500">{title}</p>
+      <p className="mt-1 text-lg font-extrabold tracking-tight">{value}</p>
     </div>
   );
 }
-
-function Row({
-  left,
-  right,
-  meta,
-  onDelete,
-}: {
-  left: string;
-  right: string;
-  meta: string;
-  onDelete: () => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "1fr auto auto",
-        gap: 10,
-        alignItems: "center",
-        border: "1px solid #eee",
-        borderRadius: 12,
-        padding: "10px 10px",
-      }}
-    >
-      <div>
-        <div style={{ fontWeight: 800 }}>{left}</div>
-        <div style={{ fontSize: 12, opacity: 0.65 }}>{meta}</div>
-      </div>
-      <div style={{ fontWeight: 900 }}>{right}</div>
-      <button onClick={onDelete} style={{ border: "1px solid #ddd", borderRadius: 10, padding: "6px 10px" }}>
-        🗑️
-      </button>
-    </div>
-  );
-}
-
-const panelStyle: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  borderRadius: 14,
-  padding: 14,
-};
-
-const inputStyle: React.CSSProperties = {
-  padding: 10,
-  borderRadius: 10,
-  border: "1px solid #ddd",
-};
-
-const primaryBtn: React.CSSProperties = {
-  padding: 10,
-  borderRadius: 10,
-  border: "none",
-  fontWeight: 900,
-  cursor: "pointer",
-};
