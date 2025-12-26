@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 type MonthRow = {
@@ -41,6 +42,7 @@ function ymNow() {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
   const [loading, setLoading] = useState(true);
@@ -80,46 +82,51 @@ export default function DashboardPage() {
 
     try {
       const { data: userData, error: userErr } = await supabase.auth.getUser();
-      if (userErr || !userData?.user) {
-        window.location.href = "/login";
+      const user = userData?.user;
+
+      if (userErr || !user) {
+        router.replace("/login");
         return;
       }
-      setEmail(userData.user.email || "");
 
-      // month row
+      setEmail(user.email || "");
+      const userId = user.id;
+
+      // 1) Month row (IMPORTANT: filter by user_id + month, and insert user_id)
       const mr = await supabase
         .from("months")
         .select("id,user_id,month,currency,budget,assets,liabilities")
+        .eq("user_id", userId)
         .eq("month", month)
-        .single();
+        .maybeSingle();
 
-      if (mr.error) {
-        // if row missing, create a default row
-        if (mr.error.code === "PGRST116") {
-          const ins = await supabase
-            .from("months")
-            .insert({
-              month,
-              currency: "GHS",
-              budget: 0,
-              assets: 0,
-              liabilities: 0,
-            })
-            .select("id,user_id,month,currency,budget,assets,liabilities")
-            .single();
+      if (mr.error) throw mr.error;
 
-          if (ins.error) throw ins.error;
-          setMonthRow(ins.data as MonthRow);
-        } else {
-          throw mr.error;
-        }
+      if (!mr.data) {
+        const ins = await supabase
+          .from("months")
+          .insert({
+            user_id: userId,
+            month,
+            currency: "GHS",
+            budget: 0,
+            assets: 0,
+            liabilities: 0,
+          })
+          .select("id,user_id,month,currency,budget,assets,liabilities")
+          .single();
+
+        if (ins.error) throw ins.error;
+        setMonthRow(ins.data as MonthRow);
       } else {
         setMonthRow(mr.data as MonthRow);
       }
 
+      // 2) Expenses (also filter by user_id for clarity)
       const ex = await supabase
         .from("expenses")
         .select("id,user_id,month,amount,category,description,occurred_at")
+        .eq("user_id", userId)
         .eq("month", month)
         .order("occurred_at", { ascending: false })
         .limit(50);
@@ -127,9 +134,11 @@ export default function DashboardPage() {
       if (ex.error) throw ex.error;
       setExpenses((ex.data || []) as ExpenseRow[]);
 
+      // 3) Assets (also filter by user_id for clarity)
       const as = await supabase
         .from("asset_events")
         .select("id,user_id,month,amount,note,created_at")
+        .eq("user_id", userId)
         .eq("month", month)
         .order("created_at", { ascending: false })
         .limit(50);
@@ -145,7 +154,7 @@ export default function DashboardPage() {
 
   async function logout() {
     await supabase.auth.signOut();
-    window.location.href = "/login";
+    router.replace("/login");
   }
 
   useEffect(() => {
@@ -272,9 +281,7 @@ export default function DashboardPage() {
                           <p className="text-sm font-semibold">
                             {(e.category || "Other").toUpperCase()}
                           </p>
-                          <p className="text-xs text-slate-500">
-                            {e.description || "—"}
-                          </p>
+                          <p className="text-xs text-slate-500">{e.description || "—"}</p>
                         </div>
                         <div className="text-right">
                           <p className="text-sm font-bold">
