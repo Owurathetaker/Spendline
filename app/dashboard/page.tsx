@@ -33,6 +33,26 @@ type AssetRow = {
   created_at: string | null;
 };
 
+type SavingGoalRow = {
+  id: number;
+  user_id: string;
+  month: string;
+  title: string; // ✅ table expects "title"
+  target_amount: number | null;
+  saved_amount: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type MilestoneRow = {
+  id: number;
+  user_id: string;
+  month: string;
+  code: string;
+  title: string;
+  unlocked_at: string;
+};
+
 const CATEGORIES = [
   "Food & Dining",
   "Transport",
@@ -56,6 +76,10 @@ function n(x: any) {
   return Number.isFinite(v) ? v : 0;
 }
 
+function clampPct(v: number) {
+  return Math.max(0, Math.min(100, v));
+}
+
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
 
@@ -66,6 +90,8 @@ export default function DashboardPage() {
   const [monthRow, setMonthRow] = useState<MonthRow | null>(null);
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
   const [assets, setAssets] = useState<AssetRow[]>([]);
+  const [goals, setGoals] = useState<SavingGoalRow[]>([]);
+  const [milestones, setMilestones] = useState<MilestoneRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Inputs (editable)
@@ -79,8 +105,15 @@ export default function DashboardPage() {
   const [assetAmount, setAssetAmount] = useState("");
   const [assetNote, setAssetNote] = useState("");
 
+  // Goals inputs
+  const [goalName, setGoalName] = useState("");
+  const [goalTarget, setGoalTarget] = useState("");
+  const [goalAddId, setGoalAddId] = useState<number | null>(null);
+  const [goalAddAmount, setGoalAddAmount] = useState("");
+
   const spentTotal = useMemo(() => expenses.reduce((s, e) => s + n(e.amount), 0), [expenses]);
   const assetsTotal = useMemo(() => assets.reduce((s, a) => s + n(a.amount), 0), [assets]);
+
   const budget = n(monthRow?.budget);
   const liabilities = n(monthRow?.liabilities);
   const remaining = budget - spentTotal;
@@ -89,8 +122,7 @@ export default function DashboardPage() {
 
   const progressPct = useMemo(() => {
     if (budget <= 0) return 0;
-    const pct = Math.round((spentTotal / budget) * 100);
-    return Math.max(0, Math.min(100, pct));
+    return clampPct(Math.round((spentTotal / budget) * 100));
   }, [spentTotal, budget]);
 
   async function requireUser() {
@@ -100,6 +132,59 @@ export default function DashboardPage() {
       return null;
     }
     return data.user;
+  }
+
+  // Safe milestone write:
+  // - If unique index exists: upsert works.
+  // - If not: insert may fail on duplicates; we ignore that (no app crash).
+  async function safeMilestone(userId: string, code: string, title: string) {
+    try {
+      const up = await supabase
+        .from("milestones")
+        .upsert(
+          {
+            user_id: userId,
+            month,
+            code,
+            title,
+            unlocked_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id,month,code" }
+        );
+      if (up.error) {
+        // fallback: try insert (ignore duplicates / constraint issues)
+        await supabase.from("milestones").insert({
+          user_id: userId,
+          month,
+          code,
+          title,
+          unlocked_at: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // never crash dashboard because of rewards
+    }
+  }
+
+  async function syncMilestones(userId: string, ex: ExpenseRow[], as: AssetRow[], gs: SavingGoalRow[]) {
+    await safeMilestone(userId, "first_login", "✅ First login");
+    if (ex.length >= 5) await safeMilestone(userId, "track_5_expenses", "🏁 Track 5 expenses");
+    if (as.length >= 1) await safeMilestone(userId, "add_first_asset", "💪 Add first asset");
+    if (gs.length >= 1) await safeMilestone(userId, "create_first_goal", "🎯 Create your first saving goal");
+
+    const hit50 = gs.some((g) => {
+      const t = n(g.target_amount);
+      const s = n(g.saved_amount);
+      return t > 0 && s / t >= 0.5;
+    });
+    if (hit50) await safeMilestone(userId, "goal_50", "🚀 Hit 50% on a goal");
+
+    const hit100 = gs.some((g) => {
+      const t = n(g.target_amount);
+      const s = n(g.saved_amount);
+      return t > 0 && s / t >= 1;
+    });
+    if (hit100) await safeMilestone(userId, "goal_100", "🏆 Complete a goal");
   }
 
   async function load() {
@@ -112,7 +197,7 @@ export default function DashboardPage() {
 
       setEmail(user.email || "");
 
-      // 1) Ensure month row exists (RLS-safe: always include user_id)
+      // 1) Ensure month row exists
       const mr = await supabase
         .from("months")
         .select("id,user_id,month,currency,budget,assets,liabilities")
@@ -146,7 +231,7 @@ export default function DashboardPage() {
         setBudgetInput(String(mr.data.budget ?? 0));
       }
 
-      // 2) Expenses (filter by user_id too, even though RLS already does it)
+      // 2) Expenses
       const ex = await supabase
         .from("expenses")
         .select("id,user_id,month,amount,category,description,occurred_at")
@@ -156,7 +241,8 @@ export default function DashboardPage() {
         .limit(50);
 
       if (ex.error) throw ex.error;
-      setExpenses((ex.data || []) as ExpenseRow[]);
+      const exRows = (ex.data || []) as ExpenseRow[];
+      setExpenses(exRows);
 
       // 3) Assets
       const as = await supabase
@@ -168,9 +254,40 @@ export default function DashboardPage() {
         .limit(50);
 
       if (as.error) throw as.error;
-      setAssets((as.data || []) as AssetRow[]);
+      const asRows = (as.data || []) as AssetRow[];
+      setAssets(asRows);
+
+      // 4) Saving goals (table must exist from your SQL)
+      const g = await supabase
+        .from("saving_goals")
+        .select("id,user_id,month,title,target_amount,saved_amount,created_at,updated_at")
+        .eq("user_id", user.id)
+        .eq("month", month)
+        .order("created_at", { ascending: false });
+
+      if (g.error) throw g.error;
+      const gRows = (g.data || []) as SavingGoalRow[];
+      setGoals(gRows);
+
+      // 5) Milestones
+      await syncMilestones(user.id, exRows, asRows, gRows);
+
+      const ms = await supabase
+        .from("milestones")
+        .select("id,user_id,month,code,title,unlocked_at")
+        .eq("user_id", user.id)
+        .eq("month", month)
+        .order("unlocked_at", { ascending: false });
+
+      if (ms.error) throw ms.error;
+      setMilestones((ms.data || []) as MilestoneRow[]);
     } catch (e: any) {
-      setError(e?.message || "Something went wrong.");
+      const msg =
+        e?.message ||
+        e?.error_description ||
+        e?.details ||
+        "Something went wrong.";
+      setError(String(msg));
     } finally {
       setLoading(false);
     }
@@ -192,13 +309,9 @@ export default function DashboardPage() {
         budget: n(budgetInput),
       };
 
-      const up = await supabase
-        .from("months")
-        .update(patch)
-        .eq("user_id", user.id)
-        .eq("month", month);
-
+      const up = await supabase.from("months").update(patch).eq("user_id", user.id).eq("month", month);
       if (up.error) throw up.error;
+
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to save month settings.");
@@ -215,7 +328,7 @@ export default function DashboardPage() {
       if (amt <= 0) throw new Error("Enter an expense amount greater than 0.");
 
       const ins = await supabase.from("expenses").insert({
-        user_id: user.id, // ✅ REQUIRED for your RLS policy
+        user_id: user.id,
         month,
         amount: amt,
         category: expCategory,
@@ -239,13 +352,9 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase
-        .from("expenses")
-        .delete()
-        .eq("id", expenseId)
-        .eq("user_id", user.id);
-
+      const del = await supabase.from("expenses").delete().eq("id", expenseId).eq("user_id", user.id);
       if (del.error) throw del.error;
+
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete expense.");
@@ -262,7 +371,7 @@ export default function DashboardPage() {
       if (amt <= 0) throw new Error("Enter an asset amount greater than 0.");
 
       const ins = await supabase.from("asset_events").insert({
-        user_id: user.id, // ✅ REQUIRED for your RLS policy
+        user_id: user.id,
         month,
         amount: amt,
         note: assetNote.trim() || null,
@@ -285,16 +394,89 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase
-        .from("asset_events")
-        .delete()
-        .eq("id", assetId)
-        .eq("user_id", user.id);
-
+      const del = await supabase.from("asset_events").delete().eq("id", assetId).eq("user_id", user.id);
       if (del.error) throw del.error;
+
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete asset.");
+    }
+  }
+
+  async function createGoal() {
+    setError(null);
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const name = goalName.trim();
+      const target = n(goalTarget);
+
+      if (!name) throw new Error("Enter a goal name.");
+      if (target <= 0) throw new Error("Enter a target amount greater than 0.");
+
+      const ins = await supabase.from("saving_goals").insert({
+        user_id: user.id,
+        month,
+        title: name, // ✅ write into "title"
+        target_amount: target,
+        saved_amount: 0,
+        updated_at: new Date().toISOString(),
+    });
+
+
+      if (ins.error) throw ins.error;
+
+      setGoalName("");
+      setGoalTarget("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to create goal.");
+    }
+  }
+
+  async function addToGoal(goalId: number) {
+    setError(null);
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const amt = n(goalAddAmount);
+      if (amt <= 0) throw new Error("Enter an amount greater than 0.");
+
+      const g = goals.find((x) => x.id === goalId);
+      if (!g) throw new Error("Goal not found.");
+
+      const newSaved = n(g.saved_amount) + amt;
+
+      const up = await supabase
+        .from("saving_goals")
+        .update({ saved_amount: newSaved, updated_at: new Date().toISOString() })
+        .eq("id", goalId)
+        .eq("user_id", user.id);
+
+      if (up.error) throw up.error;
+
+      setGoalAddId(null);
+      setGoalAddAmount("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add progress.");
+    }
+  }
+
+  async function deleteGoal(goalId: number) {
+    setError(null);
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const del = await supabase.from("saving_goals").delete().eq("id", goalId).eq("user_id", user.id);
+      if (del.error) throw del.error;
+
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to delete goal.");
     }
   }
 
@@ -310,9 +492,7 @@ export default function DashboardPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-extrabold tracking-tight">Spendline</h1>
-            <p className="text-sm text-slate-500">
-              Quiet money control — track what leaves, stack what stays.
-            </p>
+            <p className="text-sm text-slate-500">Quiet money control — track what leaves, stack what stays.</p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -376,32 +556,25 @@ export default function DashboardPage() {
                   <p className="text-sm text-slate-600">{progressPct}%</p>
                 </div>
                 <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                  <div
-                    className="h-3 rounded-full bg-emerald-500"
-                    style={{ width: `${progressPct}%` }}
-                  />
+                  <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${progressPct}%` }} />
                 </div>
-                <p className="mt-3 text-xs text-slate-500">
-                  Next: saving goals + reward milestones.
-                </p>
+                <p className="mt-3 text-xs text-slate-500">Goals + rewards are now live.</p>
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-bold">Achievements</p>
-                <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                  <li className="flex items-center justify-between">
-                    <span>✅ First login</span>
-                    <span className="text-xs text-slate-500">Unlocked</span>
-                  </li>
-                  <li className="flex items-center justify-between">
-                    <span>🏁 Track 5 expenses</span>
-                    <span className="text-xs text-slate-500">Soon</span>
-                  </li>
-                  <li className="flex items-center justify-between">
-                    <span>💪 Add first asset</span>
-                    <span className="text-xs text-slate-500">Soon</span>
-                  </li>
-                </ul>
+                {milestones.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500">No achievements yet.</p>
+                ) : (
+                  <ul className="mt-3 space-y-2 text-sm text-slate-700">
+                    {milestones.slice(0, 6).map((m) => (
+                      <li key={m.id} className="flex items-center justify-between">
+                        <span>{m.title}</span>
+                        <span className="text-xs text-slate-500">{(m.unlocked_at || "").slice(0, 10)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
 
@@ -508,8 +681,90 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Lists */}
+            {/* Goals + lists */}
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              {/* Goals */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-bold">Saving goals</p>
+
+                <div className="mt-3 grid gap-2">
+                  <input
+                    value={goalName}
+                    onChange={(e) => setGoalName(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                    placeholder="Goal name (e.g. Emergency Fund)"
+                  />
+                  <input
+                    value={goalTarget}
+                    onChange={(e) => setGoalTarget(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                    placeholder="Target amount"
+                    inputMode="decimal"
+                  />
+                  <button
+                    onClick={createGoal}
+                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700"
+                  >
+                    Create goal
+                  </button>
+                </div>
+
+                {goals.length === 0 ? (
+                  <p className="mt-4 text-sm text-slate-500">No goals yet. Create one above.</p>
+                ) : (
+                  <ul className="mt-4 space-y-2">
+                    {goals.map((g) => {
+                      const target = n(g.target_amount);
+                      const saved = n(g.saved_amount);
+                      const p = target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
+
+                      return (
+                        <li key={g.id} className="rounded-xl border border-slate-200 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm font-extrabold">{g.title}</p>s
+                              <p className="mt-1 text-xs text-slate-500">
+                                {currency} {saved.toLocaleString()} / {currency} {target.toLocaleString()} • {p}%
+                              </p>
+                            </div>
+
+                            <button
+                              onClick={() => deleteGoal(g.id)}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
+                              title="Delete goal"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+
+                          <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
+                            <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
+                          </div>
+
+                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <input
+                              value={goalAddId === g.id ? goalAddAmount : ""}
+                              onFocus={() => setGoalAddId(g.id)}
+                              onChange={(e) => setGoalAddAmount(e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                              placeholder="Add amount"
+                              inputMode="decimal"
+                            />
+                            <button
+                              onClick={() => addToGoal(g.id)}
+                              className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+                            >
+                              Add
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              {/* Expenses + assets lists */}
               <div className="rounded-2xl border border-slate-200 bg-white p-4">
                 <p className="text-sm font-bold">Recent expenses</p>
                 {expenses.length === 0 ? (
@@ -517,20 +772,11 @@ export default function DashboardPage() {
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {expenses.slice(0, 10).map((e) => (
-                      <li
-                        key={e.id}
-                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
-                      >
+                      <li key={e.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2">
                         <div className="min-w-0">
-                          <p className="text-sm font-semibold">
-                            {(e.category || "Other").toUpperCase()}
-                          </p>
-                          <p className="truncate text-xs text-slate-500">
-                            {e.description || "—"}
-                          </p>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {(e.occurred_at || "").slice(0, 10)}
-                          </p>
+                          <p className="text-sm font-semibold">{(e.category || "Other").toUpperCase()}</p>
+                          <p className="truncate text-xs text-slate-500">{e.description || "—"}</p>
+                          <p className="mt-1 text-[11px] text-slate-400">{(e.occurred_at || "").slice(0, 10)}</p>
                         </div>
 
                         <div className="flex items-center gap-2">
@@ -549,25 +795,18 @@ export default function DashboardPage() {
                     ))}
                   </ul>
                 )}
-              </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <p className="text-sm font-bold">Recent assets</p>
+                <p className="mt-6 text-sm font-bold">Recent assets</p>
                 {assets.length === 0 ? (
                   <p className="mt-3 text-sm text-slate-500">No assets yet.</p>
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {assets.slice(0, 10).map((a) => (
-                      <li
-                        key={a.id}
-                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
-                      >
+                      <li key={a.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2">
                         <div className="min-w-0">
                           <p className="text-sm font-semibold">ASSET</p>
                           <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {(a.created_at || "").slice(0, 10)}
-                          </p>
+                          <p className="mt-1 text-[11px] text-slate-400">{(a.created_at || "").slice(0, 10)}</p>
                         </div>
 
                         <div className="flex items-center gap-2">
