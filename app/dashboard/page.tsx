@@ -71,6 +71,30 @@ function clampPct(v: number) {
   return Math.max(0, Math.min(100, v));
 }
 
+function parseMonth(ym: string) {
+  // ym = "YYYY-MM"
+  const [yy, mm] = ym.split("-").map((x) => Number(x));
+  if (!yy || !mm) return null;
+  return { y: yy, m: mm };
+}
+
+function daysInMonth(ym: string) {
+  const p = parseMonth(ym);
+  if (!p) return 30;
+  // JS months are 0-based; day 0 of next month = last day of this month
+  return new Date(p.y, p.m, 0).getDate();
+}
+
+function monthCompare(a: string, b: string) {
+  // returns -1 if a<b, 0 equal, 1 if a>b
+  const pa = parseMonth(a);
+  const pb = parseMonth(b);
+  if (!pa || !pb) return 0;
+  const va = pa.y * 100 + pa.m;
+  const vb = pb.y * 100 + pb.m;
+  return va === vb ? 0 : va < vb ? -1 : 1;
+}
+
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
 
@@ -127,7 +151,7 @@ export default function DashboardPage() {
     return typeof month === "string" && month.trim() ? month : ymNow();
   }
 
-  // ✅ Option 1: Achievements are computed in-app (no database writes/reads)
+  // ✅ Option A: Achievements are computed in-app (no database writes/reads)
   const achievements = useMemo(() => {
     const expCount = expenses.length;
     const assetCount = assets.length;
@@ -145,7 +169,6 @@ export default function DashboardPage() {
       return t > 0 && s >= t;
     });
 
-    // Tier logic (simple + motivating)
     let tier = "🥉 Bronze — Getting started";
     if (goal100) tier = "🥇 Gold — Goal completed";
     else if (expCount >= 10) tier = "🥈 Silver — Consistent tracker";
@@ -179,6 +202,104 @@ export default function DashboardPage() {
       { title: "🏅 Tier badge", detail: tier },
     ];
   }, [expenses, assets, goals]);
+
+  // --- Mini analytics (fills the big empty space) ---
+  const analytics = useMemo(() => {
+    const ym = monthSafe();
+    const nowYm = ymNow();
+    const cmp = monthCompare(ym, nowYm);
+    const dim = daysInMonth(ym);
+
+    const today = new Date();
+    const dayOfMonth = today.getDate();
+
+    const daysElapsed =
+      cmp === 0 ? Math.max(1, Math.min(dayOfMonth, dim)) : cmp < 0 ? dim : 0;
+
+    const daysLeft =
+      cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
+
+    const avgDailySpend = daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
+
+    const projectedSpend =
+      daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
+
+    // Top category by total
+    const totalsByCat = new Map<string, number>();
+    for (const e of expenses) {
+      const cat = (e.category || "Other").trim() || "Other";
+      totalsByCat.set(cat, (totalsByCat.get(cat) || 0) + n(e.amount));
+    }
+
+    let topCategory = "—";
+    let topCategoryTotal = 0;
+    for (const [cat, total] of totalsByCat.entries()) {
+      if (total > topCategoryTotal) {
+        topCategoryTotal = total;
+        topCategory = cat;
+      }
+    }
+
+    return {
+      topCategory,
+      avgDailySpend,
+      daysLeft,
+      projectedSpend,
+      dim,
+    };
+  }, [expenses, spentTotal, month]);
+
+  // --- Next moves (actions that jump/focus inputs) ---
+  function focusById(id: string) {
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => el?.focus(), 250);
+  }
+
+  const nextMoves = useMemo(() => {
+    const moves: { title: string; detail: string; action: () => void }[] = [];
+
+    if (budget <= 0) {
+      moves.push({
+        title: "Set a budget for this month",
+        detail: "Even a rough number gives you direction.",
+        action: () => focusById("budget-input"),
+      });
+    }
+
+    if (expenses.length === 0) {
+      moves.push({
+        title: "Log your first expense",
+        detail: "Start with one. Momentum follows.",
+        action: () => focusById("exp-amount"),
+      });
+    } else if (expenses.length < 5) {
+      moves.push({
+        title: "Reach 5 expenses logged",
+        detail: `${expenses.length}/5 so far — quick win.`,
+        action: () => focusById("exp-amount"),
+      });
+    }
+
+    if (assets.length === 0) {
+      moves.push({
+        title: "Add your first asset",
+        detail: "Savings count. Cash counts. Start somewhere.",
+        action: () => focusById("asset-amount"),
+      });
+    }
+
+    if (goals.length === 0) {
+      moves.push({
+        title: "Create a saving goal",
+        detail: "Give your money a destination.",
+        action: () => focusById("goal-name"),
+      });
+    }
+
+    // show up to 3 to keep it clean
+    return moves.slice(0, 3);
+  }, [budget, expenses.length, assets.length, goals.length]);
 
   async function requireUser() {
     const { data, error } = await supabase.auth.getUser();
@@ -554,14 +675,89 @@ export default function DashboardPage() {
                   <p className="text-sm font-bold">Monthly Budget Progress</p>
                   <p className="text-sm text-slate-600">{progressPct}%</p>
                 </div>
+
                 <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
                   <div
                     className="h-3 rounded-full bg-emerald-500"
                     style={{ width: `${progressPct}%` }}
                   />
                 </div>
-                <p className="mt-3 text-xs text-slate-500">
-                  Goals + rewards are live (computed, no DB writes).
+
+                {/* Mini analytics + Next moves (fills the space) */}
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[11px] text-slate-500">Top category</p>
+                    <p className="mt-1 text-sm font-extrabold">
+                      {(analytics.topCategory || "—").toString()}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[11px] text-slate-500">Avg daily spend</p>
+                    <p className="mt-1 text-sm font-extrabold">
+                      {currency} {analytics.avgDailySpend.toLocaleString()}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[11px] text-slate-500">Days left</p>
+                    <p className="mt-1 text-sm font-extrabold">
+                      {analytics.daysLeft}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-slate-500">
+                    Projected spend:{" "}
+                    <span className="font-semibold text-slate-700">
+                      {currency} {analytics.projectedSpend.toLocaleString()}
+                    </span>{" "}
+                    <span className="text-slate-400">(simple estimate)</span>
+                  </p>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => focusById("exp-amount")}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
+                    >
+                      + Log expense
+                    </button>
+                    <button
+                      onClick={() => focusById("asset-amount")}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
+                    >
+                      + Add asset
+                    </button>
+                    <button
+                      onClick={() => focusById("goal-name")}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
+                    >
+                      + Create goal
+                    </button>
+                  </div>
+                </div>
+
+                {nextMoves.length > 0 && (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="text-xs font-bold text-slate-700">Next move</p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                      {nextMoves.map((m, i) => (
+                        <button
+                          key={i}
+                          onClick={m.action}
+                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 hover:bg-slate-100"
+                        >
+                          <div className="text-sm font-semibold">{m.title}</div>
+                          <div className="mt-1 text-xs text-slate-500">{m.detail}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <p className="mt-3 text-xs text-slate-400">
+                  Goals + rewards are computed (no DB writes).
                 </p>
               </div>
 
@@ -596,6 +792,7 @@ export default function DashboardPage() {
 
                 <label className="mt-3 block text-xs text-slate-500">Budget</label>
                 <input
+                  id="budget-input"
                   value={budgetInput}
                   onChange={(e) => setBudgetInput(e.target.value)}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
@@ -617,6 +814,7 @@ export default function DashboardPage() {
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
                 <input
+                  id="exp-amount"
                   value={expAmount}
                   onChange={(e) => setExpAmount(e.target.value)}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
@@ -659,6 +857,7 @@ export default function DashboardPage() {
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
                 <input
+                  id="asset-amount"
                   value={assetAmount}
                   onChange={(e) => setAssetAmount(e.target.value)}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
@@ -691,6 +890,7 @@ export default function DashboardPage() {
 
                 <div className="mt-3 grid gap-2">
                   <input
+                    id="goal-name"
                     value={goalName}
                     onChange={(e) => setGoalName(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
