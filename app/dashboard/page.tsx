@@ -54,6 +54,7 @@ const CATEGORIES = [
   "Subscriptions",
   "Other",
 ] as const;
+const QUICK_AMOUNTS = [5, 10, 20, 50, 100] as const;
 
 function ymNow() {
   const d = new Date();
@@ -146,6 +147,43 @@ export default function DashboardPage() {
     if (budget <= 0) return 0;
     return clampPct(Math.round((spentTotal / budget) * 100));
   }, [spentTotal, budget]);
+
+  // Goal helpers (safe even with nulls)
+  function goalProgress(g: SavingGoalRow) {
+    const target = n(g.target_amount);
+    const saved = n(g.saved_amount);
+    const pct = target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
+    const remaining = Math.max(0, target - saved);
+    const complete = target > 0 && saved >= target;
+    return { target, saved, pct, remaining, complete };
+  }
+
+  // Option A sorting: "Next move" goals first
+  // Priority order:
+  // 1) Not complete
+  // 2) Higher progress first (close-to-done shows up)
+  // 3) Newer first as tie-break
+  const sortedGoals = useMemo(() => {
+    const copy = [...goals];
+
+    copy.sort((a, b) => {
+      const pa = goalProgress(a);
+      const pb = goalProgress(b);
+
+      // incomplete first
+      if (pa.complete !== pb.complete) return pa.complete ? 1 : -1;
+
+      // higher % first
+      if (pb.pct !== pa.pct) return pb.pct - pa.pct;
+
+      // newest first
+      const da = new Date(a.created_at || 0).getTime();
+      const db = new Date(b.created_at || 0).getTime();
+      return db - da;
+    });
+
+    return copy;
+  }, [goals]);
 
   function monthSafe() {
     return typeof month === "string" && month.trim() ? month : ymNow();
@@ -915,58 +953,65 @@ export default function DashboardPage() {
                   <p className="mt-4 text-sm text-slate-500">No goals yet. Create one above.</p>
                 ) : (
                   <ul className="mt-4 space-y-2">
-                    {goals.map((g) => {
-                      const target = n(g.target_amount);
-                      const saved = n(g.saved_amount);
-                      const p =
-                        target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
+                    {sortedGoals.map((g) => {
+  const { target, saved, pct: p, remaining, complete } = goalProgress(g);
+  const nextMove =
+    complete ? "Completed ✅" : remaining <= 0 ? "Add any amount" : `Next: add ${currency} ${Math.min(remaining, Math.max(1, Math.round(target * 0.1))).toLocaleString()}`;
 
-                      return (
-                        <li key={g.id} className="rounded-xl border border-slate-200 p-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-sm font-extrabold">{g.title}</p>
-                              <p className="mt-1 text-xs text-slate-500">
-                                {currency} {saved.toLocaleString()} / {currency}{" "}
-                                {target.toLocaleString()} • {p}%
-                              </p>
-                            </div>
+  return (
+    <li key={g.id} className="rounded-xl border border-slate-200 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-extrabold">{g.title}</p>
+            {!complete && (
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                Next move
+              </span>
+            )}
+          </div>
 
-                            <button
-                              onClick={() => deleteGoal(g.id)}
-                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
-                              title="Delete goal"
-                            >
-                              🗑️
-                            </button>
-                          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            {currency} {saved.toLocaleString()} / {currency} {target.toLocaleString()} • {p}%
+          </p>
 
-                          <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                            <div
-                              className="h-3 rounded-full bg-emerald-500"
-                              style={{ width: `${p}%` }}
-                            />
-                          </div>
+          <p className="mt-1 text-[11px] text-slate-500">
+            {nextMove}
+          </p>
+        </div>
 
-                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                            <input
-                              value={goalAddId === g.id ? goalAddAmount : ""}
-                              onFocus={() => setGoalAddId(g.id)}
-                              onChange={(e) => setGoalAddAmount(e.target.value)}
-                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                              placeholder="Add amount"
-                              inputMode="decimal"
-                            />
-                            <button
-                              onClick={() => addToGoal(g.id)}
-                              className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
-                            >
-                              Add
-                            </button>
-                          </div>
-                        </li>
-                      );
-                    })}
+        <button
+          onClick={() => deleteGoal(g.id)}
+          className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
+          title="Delete goal"
+        >
+          🗑️
+        </button>
+      </div>
+
+      <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
+        <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
+      </div>
+
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          value={goalAddId === g.id ? goalAddAmount : ""}
+          onFocus={() => setGoalAddId(g.id)}
+          onChange={(e) => setGoalAddAmount(e.target.value)}
+          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+          placeholder="Add amount"
+          inputMode="decimal"
+        />
+        <button
+          onClick={() => addToGoal(g.id)}
+          className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+        >
+          Add
+        </button>
+      </div>
+    </li>
+  );
+})}
                   </ul>
                 )}
               </div>
