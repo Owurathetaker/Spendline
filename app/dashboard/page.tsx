@@ -54,6 +54,7 @@ const CATEGORIES = [
   "Subscriptions",
   "Other",
 ] as const;
+
 const QUICK_AMOUNTS = [5, 10, 20, 50, 100] as const;
 
 function ymNow() {
@@ -73,7 +74,6 @@ function clampPct(v: number) {
 }
 
 function parseMonth(ym: string) {
-  // ym = "YYYY-MM"
   const [yy, mm] = ym.split("-").map((x) => Number(x));
   if (!yy || !mm) return null;
   return { y: yy, m: mm };
@@ -82,12 +82,10 @@ function parseMonth(ym: string) {
 function daysInMonth(ym: string) {
   const p = parseMonth(ym);
   if (!p) return 30;
-  // JS months are 0-based; day 0 of next month = last day of this month
   return new Date(p.y, p.m, 0).getDate();
 }
 
 function monthCompare(a: string, b: string) {
-  // returns -1 if a<b, 0 equal, 1 if a>b
   const pa = parseMonth(a);
   const pb = parseMonth(b);
   if (!pa || !pb) return 0;
@@ -109,7 +107,7 @@ export default function DashboardPage() {
   const [goals, setGoals] = useState<SavingGoalRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // Inputs (editable)
+  // Inputs
   const [currencyInput, setCurrencyInput] = useState("GHS");
   const [budgetInput, setBudgetInput] = useState("0");
 
@@ -148,21 +146,21 @@ export default function DashboardPage() {
     return clampPct(Math.round((spentTotal / budget) * 100));
   }, [spentTotal, budget]);
 
-  // Goal helpers (safe even with nulls)
-  function goalProgress(g: SavingGoalRow) {
-    const target = n(g.target_amount);
-    const saved = n(g.saved_amount);
-    const pct = target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
-    const remaining = Math.max(0, target - saved);
-    const complete = target > 0 && saved >= target;
-    return { target, saved, pct, remaining, complete };
+  function monthSafe() {
+    return typeof month === "string" && month.trim() ? month : ymNow();
   }
 
-  // Option A sorting: "Next move" goals first
-  // Priority order:
-  // 1) Not complete
-  // 2) Higher progress first (close-to-done shows up)
-  // 3) Newer first as tie-break
+  // Goal helpers (safe)
+  function goalProgress(g: SavingGoalRow) {
+    const target = Math.max(0, n(g.target_amount));
+    const saved = Math.max(0, n(g.saved_amount));
+    const pct = target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
+    const remainingAmt = Math.max(0, target - saved);
+    const complete = target > 0 && saved >= target;
+    return { target, saved, pct, remaining: remainingAmt, complete };
+  }
+
+  // Option A sorting: incomplete first, then highest progress, then newest
   const sortedGoals = useMemo(() => {
     const copy = [...goals];
 
@@ -170,13 +168,9 @@ export default function DashboardPage() {
       const pa = goalProgress(a);
       const pb = goalProgress(b);
 
-      // incomplete first
       if (pa.complete !== pb.complete) return pa.complete ? 1 : -1;
-
-      // higher % first
       if (pb.pct !== pa.pct) return pb.pct - pa.pct;
 
-      // newest first
       const da = new Date(a.created_at || 0).getTime();
       const db = new Date(b.created_at || 0).getTime();
       return db - da;
@@ -185,11 +179,62 @@ export default function DashboardPage() {
     return copy;
   }, [goals]);
 
-  function monthSafe() {
-    return typeof month === "string" && month.trim() ? month : ymNow();
+  // ===== Next Move (top goal action engine) =====
+  const nextMove = useMemo(() => {
+    if (!sortedGoals || sortedGoals.length === 0) return null;
+
+    const top =
+      sortedGoals.find((g) => !goalProgress(g).complete) || sortedGoals[0];
+
+    const p = goalProgress(top);
+
+    if (p.target <= 0) {
+      return {
+        goal: top,
+        line: "Set a target amount for this goal to unlock progress nudges.",
+        suggestedAmount: 0,
+      };
+    }
+
+    const halfPoint = Math.ceil(p.target * 0.5);
+    let suggestedAmount = 0;
+    let line = "";
+
+    if (p.complete) {
+      line = "This goal is complete. Create a new one to keep momentum.";
+      suggestedAmount = 0;
+    } else if (p.pct < 50) {
+      const need = Math.max(0, halfPoint - p.saved);
+      suggestedAmount = need;
+      line = `Add ${currency} ${need.toLocaleString()} to reach 50% on “${top.title}”.`;
+    } else {
+      const need = Math.max(0, p.target - p.saved);
+      suggestedAmount = need;
+      line = `You’re ${currency} ${need.toLocaleString()} away from completing “${top.title}”.`;
+    }
+
+    return { goal: top, line, suggestedAmount };
+  }, [sortedGoals, currency]);
+
+  function jumpToGoalInput(goalId: number) {
+    setGoalAddId(goalId);
+
+    const sug =
+      nextMove?.goal?.id === goalId ? nextMove?.suggestedAmount ?? 0 : 0;
+    if (sug > 0) setGoalAddAmount(String(sug));
+
+    setTimeout(() => {
+      document
+        .getElementById("goals-section")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const el = document.getElementById(
+        `goal-add-${goalId}`
+      ) as HTMLInputElement | null;
+      el?.focus();
+    }, 50);
   }
 
-  // ✅ Option A: Achievements are computed in-app (no database writes/reads)
+  // ✅ Option A: Achievements computed in-app
   const achievements = useMemo(() => {
     const expCount = expenses.length;
     const assetCount = assets.length;
@@ -214,19 +259,29 @@ export default function DashboardPage() {
     return [
       { title: "✅ First login", detail: "You’re in. That’s step one." },
       {
-        title: expCount >= 5 ? "🏁 Track 5 expenses" : "🏁 Track 5 expenses (locked)",
+        title:
+          expCount >= 5
+            ? "🏁 Track 5 expenses"
+            : "🏁 Track 5 expenses (locked)",
         detail: `${Math.min(expCount, 5)}/5 logged this month`,
       },
       {
-        title: expCount >= 10 ? "🥈 Track 10 expenses" : "🥈 Track 10 expenses (locked)",
+        title:
+          expCount >= 10
+            ? "🥈 Track 10 expenses"
+            : "🥈 Track 10 expenses (locked)",
         detail: `${Math.min(expCount, 10)}/10 logged this month`,
       },
       {
-        title: assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
+        title:
+          assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
         detail: assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
       },
       {
-        title: goalCount >= 1 ? "🎯 Create your first saving goal" : "🎯 Create your first saving goal (locked)",
+        title:
+          goalCount >= 1
+            ? "🎯 Create your first saving goal"
+            : "🎯 Create your first saving goal (locked)",
         detail: goalCount >= 1 ? "Goals are live" : "Create a goal to unlock",
       },
       {
@@ -241,7 +296,7 @@ export default function DashboardPage() {
     ];
   }, [expenses, assets, goals]);
 
-  // --- Mini analytics (fills the big empty space) ---
+  // --- Mini analytics ---
   const analytics = useMemo(() => {
     const ym = monthSafe();
     const nowYm = ymNow();
@@ -254,15 +309,11 @@ export default function DashboardPage() {
     const daysElapsed =
       cmp === 0 ? Math.max(1, Math.min(dayOfMonth, dim)) : cmp < 0 ? dim : 0;
 
-    const daysLeft =
-      cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
+    const daysLeft = cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
 
     const avgDailySpend = daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
+    const projectedSpend = daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
 
-    const projectedSpend =
-      daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
-
-    // Top category by total
     const totalsByCat = new Map<string, number>();
     for (const e of expenses) {
       const cat = (e.category || "Other").trim() || "Other";
@@ -278,18 +329,15 @@ export default function DashboardPage() {
       }
     }
 
-    return {
-      topCategory,
-      avgDailySpend,
-      daysLeft,
-      projectedSpend,
-      dim,
-    };
+    return { topCategory, avgDailySpend, daysLeft, projectedSpend, dim };
   }, [expenses, spentTotal, month]);
 
-  // --- Next moves (actions that jump/focus inputs) ---
+  // --- Next moves (jump/focus) ---
   function focusById(id: string) {
-    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+    const el = document.getElementById(id) as
+      | HTMLInputElement
+      | HTMLSelectElement
+      | null;
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
     setTimeout(() => el?.focus(), 250);
   }
@@ -335,7 +383,6 @@ export default function DashboardPage() {
       });
     }
 
-    // show up to 3 to keep it clean
     return moves.slice(0, 3);
   }, [budget, expenses.length, assets.length, goals.length]);
 
@@ -358,7 +405,6 @@ export default function DashboardPage() {
 
       setEmail(user.email || "");
 
-      // 1) Ensure month row exists
       const mr = await supabase
         .from("months")
         .select("id,user_id,month,currency,budget,assets,liabilities")
@@ -392,7 +438,6 @@ export default function DashboardPage() {
         setBudgetInput(String(mr.data.budget ?? 0));
       }
 
-      // 2) Expenses
       const ex = await supabase
         .from("expenses")
         .select("id,user_id,month,amount,category,description,occurred_at")
@@ -404,7 +449,6 @@ export default function DashboardPage() {
       if (ex.error) throw ex.error;
       setExpenses((ex.data || []) as ExpenseRow[]);
 
-      // 3) Assets
       const asq = await supabase
         .from("asset_events")
         .select("id,user_id,month,amount,note,created_at")
@@ -416,7 +460,6 @@ export default function DashboardPage() {
       if (asq.error) throw asq.error;
       setAssets((asq.data || []) as AssetRow[]);
 
-      // 4) Goals
       const gq = await supabase
         .from("saving_goals")
         .select("id,user_id,month,title,target_amount,saved_amount,created_at,updated_at")
@@ -721,7 +764,7 @@ export default function DashboardPage() {
                   />
                 </div>
 
-                {/* Mini analytics + Next moves (fills the space) */}
+                {/* Mini analytics */}
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-[11px] text-slate-500">Top category</p>
@@ -739,9 +782,7 @@ export default function DashboardPage() {
 
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-[11px] text-slate-500">Days left</p>
-                    <p className="mt-1 text-sm font-extrabold">
-                      {analytics.daysLeft}
-                    </p>
+                    <p className="mt-1 text-sm font-extrabold">{analytics.daysLeft}</p>
                   </div>
                 </div>
 
@@ -776,6 +817,7 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
+                {/* Next move cards */}
                 {nextMoves.length > 0 && (
                   <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
                     <p className="text-xs font-bold text-slate-700">Next move</p>
@@ -794,8 +836,24 @@ export default function DashboardPage() {
                   </div>
                 )}
 
+                {/* Top goal next move */}
+                {nextMove && (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-bold text-slate-700">Goal next move</p>
+                    <p className="mt-1 text-xs text-slate-600">{nextMove.line}</p>
+                    {!goalProgress(nextMove.goal).complete && (
+                      <button
+                        onClick={() => jumpToGoalInput(nextMove.goal.id)}
+                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+                      >
+                        Add to this goal
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 <p className="mt-3 text-xs text-slate-400">
-                  Goals + rewards are computed (no DB writes).
+                  Your next move updates automatically as you log activity.
                 </p>
               </div>
 
@@ -873,7 +931,9 @@ export default function DashboardPage() {
                   ))}
                 </select>
 
-                <label className="mt-3 block text-xs text-slate-500">Description (optional)</label>
+                <label className="mt-3 block text-xs text-slate-500">
+                  Description (optional)
+                </label>
                 <input
                   value={expDesc}
                   onChange={(e) => setExpDesc(e.target.value)}
@@ -923,7 +983,10 @@ export default function DashboardPage() {
             {/* Goals + lists */}
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               {/* Goals */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div
+                id="goals-section"
+                className="rounded-2xl border border-slate-200 bg-white p-4"
+              >
                 <p className="text-sm font-bold">Saving goals</p>
 
                 <div className="mt-3 grid gap-2">
@@ -950,68 +1013,101 @@ export default function DashboardPage() {
                 </div>
 
                 {goals.length === 0 ? (
-                  <p className="mt-4 text-sm text-slate-500">No goals yet. Create one above.</p>
+                  <p className="mt-4 text-sm text-slate-500">
+                    No goals yet. Create one above.
+                  </p>
                 ) : (
                   <ul className="mt-4 space-y-2">
                     {sortedGoals.map((g) => {
-  const { target, saved, pct: p, remaining, complete } = goalProgress(g);
-  const nextMove =
-    complete ? "Completed ✅" : remaining <= 0 ? "Add any amount" : `Next: add ${currency} ${Math.min(remaining, Math.max(1, Math.round(target * 0.1))).toLocaleString()}`;
+                      const { target, saved, pct: p, remaining: rem, complete } = goalProgress(g);
 
-  return (
-    <li key={g.id} className="rounded-xl border border-slate-200 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-extrabold">{g.title}</p>
-            {!complete && (
-              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                Next move
-              </span>
-            )}
-          </div>
+                      const perStep = Math.max(1, Math.round(target * 0.1));
+                      const suggested = complete ? 0 : Math.min(rem, perStep);
 
-          <p className="mt-1 text-xs text-slate-500">
-            {currency} {saved.toLocaleString()} / {currency} {target.toLocaleString()} • {p}%
-          </p>
+                      const goalNudge = complete
+                        ? "Completed ✅"
+                        : rem <= 0
+                        ? "Add any amount"
+                        : `Next: add ${currency} ${suggested.toLocaleString()}`;
 
-          <p className="mt-1 text-[11px] text-slate-500">
-            {nextMove}
-          </p>
-        </div>
+                      return (
+                        <li key={g.id} className="rounded-xl border border-slate-200 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-extrabold">{g.title}</p>
+                                {!complete && (
+                                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                    Next move
+                                  </span>
+                                )}
+                              </div>
 
-        <button
-          onClick={() => deleteGoal(g.id)}
-          className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
-          title="Delete goal"
-        >
-          🗑️
-        </button>
-      </div>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {currency} {saved.toLocaleString()} / {currency}{" "}
+                                {target.toLocaleString()} • {p}%
+                              </p>
 
-      <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-        <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
-      </div>
+                              <p className="mt-1 text-[11px] text-slate-500">{goalNudge}</p>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          value={goalAddId === g.id ? goalAddAmount : ""}
-          onFocus={() => setGoalAddId(g.id)}
-          onChange={(e) => setGoalAddAmount(e.target.value)}
-          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-          placeholder="Add amount"
-          inputMode="decimal"
-        />
-        <button
-          onClick={() => addToGoal(g.id)}
-          className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
-        >
-          Add
-        </button>
-      </div>
-    </li>
-  );
-})}
+                              {!complete && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {QUICK_AMOUNTS.map((qa) => (
+                                    <button
+                                      key={qa}
+                                      onClick={() => {
+                                        setGoalAddId(g.id);
+                                        setGoalAddAmount(String(qa));
+                                      }}
+                                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold hover:bg-slate-50"
+                                      title={`Quick add ${qa}`}
+                                    >
+                                      +{qa}
+                                    </button>
+                                  ))}
+                                  <button
+                                    onClick={() => jumpToGoalInput(g.id)}
+                                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold hover:bg-slate-50"
+                                  >
+                                    Focus
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            <button
+                              onClick={() => deleteGoal(g.id)}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
+                              title="Delete goal"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+
+                          <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
+                            <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
+                          </div>
+
+                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <input
+                              id={`goal-add-${g.id}`}
+                              value={goalAddId === g.id ? goalAddAmount : ""}
+                              onFocus={() => setGoalAddId(g.id)}
+                              onChange={(e) => setGoalAddAmount(e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                              placeholder="Add amount"
+                              inputMode="decimal"
+                            />
+                            <button
+                              onClick={() => addToGoal(g.id)}
+                              className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+                            >
+                              Add
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
@@ -1032,7 +1128,9 @@ export default function DashboardPage() {
                           <p className="text-sm font-semibold">
                             {(e.category || "Other").toUpperCase()}
                           </p>
-                          <p className="truncate text-xs text-slate-500">{e.description || "—"}</p>
+                          <p className="truncate text-xs text-slate-500">
+                            {e.description || "—"}
+                          </p>
                           <p className="mt-1 text-[11px] text-slate-400">
                             {(e.occurred_at || "").slice(0, 10)}
                           </p>
@@ -1067,7 +1165,9 @@ export default function DashboardPage() {
                       >
                         <div className="min-w-0">
                           <p className="text-sm font-semibold">ASSET</p>
-                          <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
+                          <p className="truncate text-xs text-slate-500">
+                            {a.note || "—"}
+                          </p>
                           <p className="mt-1 text-[11px] text-slate-400">
                             {(a.created_at || "").slice(0, 10)}
                           </p>
