@@ -37,20 +37,11 @@ type SavingGoalRow = {
   id: number;
   user_id: string;
   month: string;
-  title: string; // ✅ table expects "title"
+  title: string;
   target_amount: number | null;
   saved_amount: number | null;
   created_at: string | null;
   updated_at: string | null;
-};
-
-type MilestoneRow = {
-  id: number;
-  user_id: string;
-  month: string;
-  code: string;
-  title: string;
-  unlocked_at: string;
 };
 
 const CATEGORIES = [
@@ -91,7 +82,6 @@ export default function DashboardPage() {
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [goals, setGoals] = useState<SavingGoalRow[]>([]);
-  const [milestones, setMilestones] = useState<MilestoneRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Inputs (editable)
@@ -99,7 +89,8 @@ export default function DashboardPage() {
   const [budgetInput, setBudgetInput] = useState("0");
 
   const [expAmount, setExpAmount] = useState("");
-  const [expCategory, setExpCategory] = useState<(typeof CATEGORIES)[number]>("Other");
+  const [expCategory, setExpCategory] =
+    useState<(typeof CATEGORIES)[number]>("Other");
   const [expDesc, setExpDesc] = useState("");
 
   const [assetAmount, setAssetAmount] = useState("");
@@ -111,8 +102,15 @@ export default function DashboardPage() {
   const [goalAddId, setGoalAddId] = useState<number | null>(null);
   const [goalAddAmount, setGoalAddAmount] = useState("");
 
-  const spentTotal = useMemo(() => expenses.reduce((s, e) => s + n(e.amount), 0), [expenses]);
-  const assetsTotal = useMemo(() => assets.reduce((s, a) => s + n(a.amount), 0), [assets]);
+  const spentTotal = useMemo(
+    () => expenses.reduce((s, e) => s + n(e.amount), 0),
+    [expenses]
+  );
+
+  const assetsTotal = useMemo(
+    () => assets.reduce((s, a) => s + n(a.amount), 0),
+    [assets]
+  );
 
   const budget = n(monthRow?.budget);
   const liabilities = n(monthRow?.liabilities);
@@ -125,6 +123,63 @@ export default function DashboardPage() {
     return clampPct(Math.round((spentTotal / budget) * 100));
   }, [spentTotal, budget]);
 
+  function monthSafe() {
+    return typeof month === "string" && month.trim() ? month : ymNow();
+  }
+
+  // ✅ Option 1: Achievements are computed in-app (no database writes/reads)
+  const achievements = useMemo(() => {
+    const expCount = expenses.length;
+    const assetCount = assets.length;
+    const goalCount = goals.length;
+
+    const goal50 = goals.some((g) => {
+      const t = n(g.target_amount);
+      const s = n(g.saved_amount);
+      return t > 0 && s / t >= 0.5;
+    });
+
+    const goal100 = goals.some((g) => {
+      const t = n(g.target_amount);
+      const s = n(g.saved_amount);
+      return t > 0 && s >= t;
+    });
+
+    // Tier logic (simple + motivating)
+    let tier = "🥉 Bronze — Getting started";
+    if (goal100) tier = "🥇 Gold — Goal completed";
+    else if (expCount >= 10) tier = "🥈 Silver — Consistent tracker";
+
+    return [
+      { title: "✅ First login", detail: "You’re in. That’s step one." },
+      {
+        title: expCount >= 5 ? "🏁 Track 5 expenses" : "🏁 Track 5 expenses (locked)",
+        detail: `${Math.min(expCount, 5)}/5 logged this month`,
+      },
+      {
+        title: expCount >= 10 ? "🥈 Track 10 expenses" : "🥈 Track 10 expenses (locked)",
+        detail: `${Math.min(expCount, 10)}/10 logged this month`,
+      },
+      {
+        title: assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
+        detail: assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
+      },
+      {
+        title: goalCount >= 1 ? "🎯 Create your first saving goal" : "🎯 Create your first saving goal (locked)",
+        detail: goalCount >= 1 ? "Goals are live" : "Create a goal to unlock",
+      },
+      {
+        title: goal50 ? "🚀 Hit 50% on a goal" : "🚀 Hit 50% on a goal (locked)",
+        detail: goal50 ? "Halfway there" : "Build your saved amount to 50%",
+      },
+      {
+        title: goal100 ? "🏆 Complete a goal" : "🏆 Complete a goal (locked)",
+        detail: goal100 ? "You finished a goal" : "Reach 100% on any goal",
+      },
+      { title: "🏅 Tier badge", detail: tier },
+    ];
+  }, [expenses, assets, goals]);
+
   async function requireUser() {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data?.user) {
@@ -132,59 +187,6 @@ export default function DashboardPage() {
       return null;
     }
     return data.user;
-  }
-
-  // Safe milestone write:
-  // - If unique index exists: upsert works.
-  // - If not: insert may fail on duplicates; we ignore that (no app crash).
-  async function safeMilestone(userId: string, code: string, title: string) {
-    try {
-      const up = await supabase
-        .from("milestones")
-        .upsert(
-          {
-            user_id: userId,
-            month,
-            code,
-            title,
-            unlocked_at: new Date().toISOString(),
-          },
-          { onConflict: "user_id,month,code" }
-        );
-      if (up.error) {
-        // fallback: try insert (ignore duplicates / constraint issues)
-        await supabase.from("milestones").insert({
-          user_id: userId,
-          month,
-          code,
-          title,
-          unlocked_at: new Date().toISOString(),
-        });
-      }
-    } catch {
-      // never crash dashboard because of rewards
-    }
-  }
-
-  async function syncMilestones(userId: string, ex: ExpenseRow[], as: AssetRow[], gs: SavingGoalRow[]) {
-    await safeMilestone(userId, "first_login", "✅ First login");
-    if (ex.length >= 5) await safeMilestone(userId, "track_5_expenses", "🏁 Track 5 expenses");
-    if (as.length >= 1) await safeMilestone(userId, "add_first_asset", "💪 Add first asset");
-    if (gs.length >= 1) await safeMilestone(userId, "create_first_goal", "🎯 Create your first saving goal");
-
-    const hit50 = gs.some((g) => {
-      const t = n(g.target_amount);
-      const s = n(g.saved_amount);
-      return t > 0 && s / t >= 0.5;
-    });
-    if (hit50) await safeMilestone(userId, "goal_50", "🚀 Hit 50% on a goal");
-
-    const hit100 = gs.some((g) => {
-      const t = n(g.target_amount);
-      const s = n(g.saved_amount);
-      return t > 0 && s / t >= 1;
-    });
-    if (hit100) await safeMilestone(userId, "goal_100", "🏆 Complete a goal");
   }
 
   async function load() {
@@ -202,7 +204,7 @@ export default function DashboardPage() {
         .from("months")
         .select("id,user_id,month,currency,budget,assets,liabilities")
         .eq("user_id", user.id)
-        .eq("month", month)
+        .eq("month", monthSafe())
         .maybeSingle();
 
       if (mr.error) throw mr.error;
@@ -212,7 +214,7 @@ export default function DashboardPage() {
           .from("months")
           .insert({
             user_id: user.id,
-            month,
+            month: monthSafe(),
             currency: "GHS",
             budget: 0,
             assets: 0,
@@ -236,57 +238,38 @@ export default function DashboardPage() {
         .from("expenses")
         .select("id,user_id,month,amount,category,description,occurred_at")
         .eq("user_id", user.id)
-        .eq("month", month)
+        .eq("month", monthSafe())
         .order("occurred_at", { ascending: false })
         .limit(50);
 
       if (ex.error) throw ex.error;
-      const exRows = (ex.data || []) as ExpenseRow[];
-      setExpenses(exRows);
+      setExpenses((ex.data || []) as ExpenseRow[]);
 
       // 3) Assets
-      const as = await supabase
+      const asq = await supabase
         .from("asset_events")
         .select("id,user_id,month,amount,note,created_at")
         .eq("user_id", user.id)
-        .eq("month", month)
+        .eq("month", monthSafe())
         .order("created_at", { ascending: false })
         .limit(50);
 
-      if (as.error) throw as.error;
-      const asRows = (as.data || []) as AssetRow[];
-      setAssets(asRows);
+      if (asq.error) throw asq.error;
+      setAssets((asq.data || []) as AssetRow[]);
 
-      // 4) Saving goals (table must exist from your SQL)
-      const g = await supabase
+      // 4) Goals
+      const gq = await supabase
         .from("saving_goals")
         .select("id,user_id,month,title,target_amount,saved_amount,created_at,updated_at")
         .eq("user_id", user.id)
-        .eq("month", month)
+        .eq("month", monthSafe())
         .order("created_at", { ascending: false });
 
-      if (g.error) throw g.error;
-      const gRows = (g.data || []) as SavingGoalRow[];
-      setGoals(gRows);
-
-      // 5) Milestones
-      await syncMilestones(user.id, exRows, asRows, gRows);
-
-      const ms = await supabase
-        .from("milestones")
-        .select("id,user_id,month,code,title,unlocked_at")
-        .eq("user_id", user.id)
-        .eq("month", month)
-        .order("unlocked_at", { ascending: false });
-
-      if (ms.error) throw ms.error;
-      setMilestones((ms.data || []) as MilestoneRow[]);
+      if (gq.error) throw gq.error;
+      setGoals((gq.data || []) as SavingGoalRow[]);
     } catch (e: any) {
       const msg =
-        e?.message ||
-        e?.error_description ||
-        e?.details ||
-        "Something went wrong.";
+        e?.message || e?.error_description || e?.details || "Something went wrong.";
       setError(String(msg));
     } finally {
       setLoading(false);
@@ -309,9 +292,13 @@ export default function DashboardPage() {
         budget: n(budgetInput),
       };
 
-      const up = await supabase.from("months").update(patch).eq("user_id", user.id).eq("month", month);
-      if (up.error) throw up.error;
+      const up = await supabase
+        .from("months")
+        .update(patch)
+        .eq("user_id", user.id)
+        .eq("month", monthSafe());
 
+      if (up.error) throw up.error;
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to save month settings.");
@@ -329,7 +316,7 @@ export default function DashboardPage() {
 
       const ins = await supabase.from("expenses").insert({
         user_id: user.id,
-        month,
+        month: monthSafe(),
         amount: amt,
         category: expCategory,
         description: expDesc.trim() || null,
@@ -352,9 +339,13 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase.from("expenses").delete().eq("id", expenseId).eq("user_id", user.id);
-      if (del.error) throw del.error;
+      const del = await supabase
+        .from("expenses")
+        .delete()
+        .eq("id", expenseId)
+        .eq("user_id", user.id);
 
+      if (del.error) throw del.error;
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete expense.");
@@ -372,7 +363,7 @@ export default function DashboardPage() {
 
       const ins = await supabase.from("asset_events").insert({
         user_id: user.id,
-        month,
+        month: monthSafe(),
         amount: amt,
         note: assetNote.trim() || null,
         created_at: new Date().toISOString(),
@@ -394,9 +385,13 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase.from("asset_events").delete().eq("id", assetId).eq("user_id", user.id);
-      if (del.error) throw del.error;
+      const del = await supabase
+        .from("asset_events")
+        .delete()
+        .eq("id", assetId)
+        .eq("user_id", user.id);
 
+      if (del.error) throw del.error;
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete asset.");
@@ -417,13 +412,12 @@ export default function DashboardPage() {
 
       const ins = await supabase.from("saving_goals").insert({
         user_id: user.id,
-        month,
-        title: name, // ✅ write into "title"
+        month: monthSafe(),
+        title: name,
         target_amount: target,
         saved_amount: 0,
         updated_at: new Date().toISOString(),
-    });
-
+      });
 
       if (ins.error) throw ins.error;
 
@@ -471,9 +465,13 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase.from("saving_goals").delete().eq("id", goalId).eq("user_id", user.id);
-      if (del.error) throw del.error;
+      const del = await supabase
+        .from("saving_goals")
+        .delete()
+        .eq("id", goalId)
+        .eq("user_id", user.id);
 
+      if (del.error) throw del.error;
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete goal.");
@@ -492,7 +490,9 @@ export default function DashboardPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-extrabold tracking-tight">Spendline</h1>
-            <p className="text-sm text-slate-500">Quiet money control — track what leaves, stack what stays.</p>
+            <p className="text-sm text-slate-500">
+              Quiet money control — track what leaves, stack what stays.
+            </p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -513,7 +513,7 @@ export default function DashboardPage() {
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
           <div>
             <p className="text-xs text-slate-500">Month</p>
-            <p className="text-sm font-semibold">{month}</p>
+            <p className="text-sm font-semibold">{monthSafe()}</p>
           </div>
 
           <input
@@ -524,7 +524,6 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* Loading / error */}
         {loading && (
           <div className="mt-6 rounded-2xl border border-slate-200 p-4">
             <p className="text-sm text-slate-600">Loading dashboard…</p>
@@ -556,25 +555,28 @@ export default function DashboardPage() {
                   <p className="text-sm text-slate-600">{progressPct}%</p>
                 </div>
                 <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                  <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${progressPct}%` }} />
+                  <div
+                    className="h-3 rounded-full bg-emerald-500"
+                    style={{ width: `${progressPct}%` }}
+                  />
                 </div>
-                <p className="mt-3 text-xs text-slate-500">Goals + rewards are now live.</p>
+                <p className="mt-3 text-xs text-slate-500">
+                  Goals + rewards are live (computed, no DB writes).
+                </p>
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-bold">Achievements</p>
-                {milestones.length === 0 ? (
-                  <p className="mt-3 text-sm text-slate-500">No achievements yet.</p>
-                ) : (
-                  <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                    {milestones.slice(0, 6).map((m) => (
-                      <li key={m.id} className="flex items-center justify-between">
-                        <span>{m.title}</span>
-                        <span className="text-xs text-slate-500">{(m.unlocked_at || "").slice(0, 10)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <ul className="mt-3 space-y-2 text-sm text-slate-700">
+                  {achievements.map((a, i) => (
+                    <li key={i} className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold">{a.title}</div>
+                        <div className="text-xs text-slate-500 truncate">{a.detail}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               </div>
             </div>
 
@@ -716,15 +718,17 @@ export default function DashboardPage() {
                     {goals.map((g) => {
                       const target = n(g.target_amount);
                       const saved = n(g.saved_amount);
-                      const p = target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
+                      const p =
+                        target <= 0 ? 0 : clampPct(Math.round((saved / target) * 100));
 
                       return (
                         <li key={g.id} className="rounded-xl border border-slate-200 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <p className="text-sm font-extrabold">{g.title}</p>s
+                              <p className="text-sm font-extrabold">{g.title}</p>
                               <p className="mt-1 text-xs text-slate-500">
-                                {currency} {saved.toLocaleString()} / {currency} {target.toLocaleString()} • {p}%
+                                {currency} {saved.toLocaleString()} / {currency}{" "}
+                                {target.toLocaleString()} • {p}%
                               </p>
                             </div>
 
@@ -738,7 +742,10 @@ export default function DashboardPage() {
                           </div>
 
                           <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                            <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
+                            <div
+                              className="h-3 rounded-full bg-emerald-500"
+                              style={{ width: `${p}%` }}
+                            />
                           </div>
 
                           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -772,11 +779,18 @@ export default function DashboardPage() {
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {expenses.slice(0, 10).map((e) => (
-                      <li key={e.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2">
+                      <li
+                        key={e.id}
+                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                      >
                         <div className="min-w-0">
-                          <p className="text-sm font-semibold">{(e.category || "Other").toUpperCase()}</p>
+                          <p className="text-sm font-semibold">
+                            {(e.category || "Other").toUpperCase()}
+                          </p>
                           <p className="truncate text-xs text-slate-500">{e.description || "—"}</p>
-                          <p className="mt-1 text-[11px] text-slate-400">{(e.occurred_at || "").slice(0, 10)}</p>
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            {(e.occurred_at || "").slice(0, 10)}
+                          </p>
                         </div>
 
                         <div className="flex items-center gap-2">
@@ -802,11 +816,16 @@ export default function DashboardPage() {
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {assets.slice(0, 10).map((a) => (
-                      <li key={a.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2">
+                      <li
+                        key={a.id}
+                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                      >
                         <div className="min-w-0">
                           <p className="text-sm font-semibold">ASSET</p>
                           <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
-                          <p className="mt-1 text-[11px] text-slate-400">{(a.created_at || "").slice(0, 10)}</p>
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            {(a.created_at || "").slice(0, 10)}
+                          </p>
                         </div>
 
                         <div className="flex items-center gap-2">
