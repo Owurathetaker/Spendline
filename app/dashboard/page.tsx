@@ -55,7 +55,7 @@ const CATEGORIES = [
   "Other",
 ] as const;
 
-const QUICK_AMOUNTS = [5, 10, 20, 50, 100] as const;
+const QUICK_AMOUNTS = [100, 250, 500, 1000, 2000] as const;
 
 function ymNow() {
   const d = new Date();
@@ -71,6 +71,21 @@ function n(x: any) {
 
 function clampPct(v: number) {
   return Math.max(0, Math.min(100, v));
+}
+
+function currencySymbol(code: string) {
+  switch ((code || "").toUpperCase()) {
+    case "USD":
+      return "$";
+    case "GHS":
+      return "₵";
+    case "EUR":
+      return "€";
+    case "GBP":
+      return "£";
+    default:
+      return (code || "").toUpperCase() ? `${code.toUpperCase()} ` : "";
+  }
 }
 
 function parseMonth(ym: string) {
@@ -106,6 +121,12 @@ export default function DashboardPage() {
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [goals, setGoals] = useState<SavingGoalRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [nudge, setNudge] = useState<string | null>(null);
+ 
+function pushNudge(msg: string) {
+  setNudge(msg);
+  window.setTimeout(() => setNudge(null), 2500);
+}
 
   // Inputs
   const [currencyInput, setCurrencyInput] = useState("GHS");
@@ -124,6 +145,31 @@ export default function DashboardPage() {
   const [goalTarget, setGoalTarget] = useState("");
   const [goalAddId, setGoalAddId] = useState<number | null>(null);
   const [goalAddAmount, setGoalAddAmount] = useState("");
+  // Create goal inline errors
+  const [goalNameErr, setGoalNameErr] = useState<string | null>(null);
+  const [goalTargetErr, setGoalTargetErr] = useState<string | null>(null);
+
+  // Optional edit states
+  const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
+  const [editExpAmount, setEditExpAmount] = useState("");
+  const [editExpCategory, setEditExpCategory] =
+    useState<(typeof CATEGORIES)[number]>("Other");
+  const [editExpDesc, setEditExpDesc] = useState("");
+
+  const [editingGoalId, setEditingGoalId] = useState<number | null>(null);
+  const [editGoalTitle, setEditGoalTitle] = useState("");
+  const [editGoalTarget, setEditGoalTarget] = useState("");
+
+  // ✅ Guard rails: 5 saving states
+  const [savingMonthSettings, setSavingMonthSettings] = useState(false);
+  const [savingExpenseId, setSavingExpenseId] = useState<number | "new" | null>(
+    null
+  );
+  const [savingAssetId, setSavingAssetId] = useState<number | "new" | null>(
+    null
+  );
+  const [savingGoalCreate, setSavingGoalCreate] = useState(false);
+  const [savingGoalId, setSavingGoalId] = useState<number | null>(null);
 
   const spentTotal = useMemo(
     () => expenses.reduce((s, e) => s + n(e.amount), 0),
@@ -139,7 +185,11 @@ export default function DashboardPage() {
   const liabilities = n(monthRow?.liabilities);
   const remaining = budget - spentTotal;
   const netWorth = assetsTotal - liabilities;
+
   const currency = (monthRow?.currency || currencyInput || "GHS").toUpperCase();
+  const symbol = currencySymbol(currency);
+
+  const fmtMoney = (amount: number) => `${symbol}${n(amount).toLocaleString()}`;
 
   const progressPct = useMemo(() => {
     if (budget <= 0) return 0;
@@ -197,24 +247,32 @@ export default function DashboardPage() {
     }
 
     const halfPoint = Math.ceil(p.target * 0.5);
-    let suggestedAmount = 0;
-    let line = "";
 
     if (p.complete) {
-      line = "This goal is complete. Create a new one to keep momentum.";
-      suggestedAmount = 0;
-    } else if (p.pct < 50) {
-      const need = Math.max(0, halfPoint - p.saved);
-      suggestedAmount = need;
-      line = `Add ${currency} ${need.toLocaleString()} to reach 50% on “${top.title}”.`;
-    } else {
-      const need = Math.max(0, p.target - p.saved);
-      suggestedAmount = need;
-      line = `You’re ${currency} ${need.toLocaleString()} away from completing “${top.title}”.`;
+      return {
+        goal: top,
+        line: "This goal is complete.",
+        suggestedAmount: 0,
+      };
     }
 
-    return { goal: top, line, suggestedAmount };
-  }, [sortedGoals, currency]);
+    if (p.pct < 50) {
+      const need = Math.max(0, halfPoint - p.saved);
+      return {
+        goal: top,
+        line: `Add ${fmtMoney(need)} to reach 50% on “${top.title}”.`,
+        suggestedAmount: need,
+      };
+    }
+
+    const need = Math.max(0, p.target - p.saved);
+    return {
+      goal: top,
+      line: `You’re ${fmtMoney(need)} away from completing “${top.title}”.`,
+      suggestedAmount: need,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedGoals, symbol]);
 
   function jumpToGoalInput(goalId: number) {
     setGoalAddId(goalId);
@@ -234,7 +292,21 @@ export default function DashboardPage() {
     }, 50);
   }
 
-  // ✅ Option A: Achievements computed in-app
+  // Quick/Smart add: preset only (no auto-add)
+  function presetGoalAmount(goalId: number, amount: number) {
+    setGoalAddId(goalId);
+    setGoalAddAmount(String(amount));
+
+    setTimeout(() => {
+      const el = document.getElementById(
+        `goal-add-${goalId}`
+      ) as HTMLInputElement | null;
+      el?.focus();
+      el?.select?.();
+    }, 50);
+  }
+
+  // ✅ Achievements computed in-app
   const achievements = useMemo(() => {
     const expCount = expenses.length;
     const assetCount = assets.length;
@@ -275,7 +347,8 @@ export default function DashboardPage() {
       {
         title:
           assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
-        detail: assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
+        detail:
+          assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
       },
       {
         title:
@@ -309,10 +382,14 @@ export default function DashboardPage() {
     const daysElapsed =
       cmp === 0 ? Math.max(1, Math.min(dayOfMonth, dim)) : cmp < 0 ? dim : 0;
 
-    const daysLeft = cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
+    const daysLeft =
+      cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
 
-    const avgDailySpend = daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
-    const projectedSpend = daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
+    const avgDailySpend =
+      daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
+
+    const projectedSpend =
+      daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
 
     const totalsByCat = new Map<string, number>();
     for (const e of expenses) {
@@ -342,6 +419,7 @@ export default function DashboardPage() {
     setTimeout(() => el?.focus(), 250);
   }
 
+  // NOTE: you asked to NOT show "create goal" here
   const nextMoves = useMemo(() => {
     const moves: { title: string; detail: string; action: () => void }[] = [];
 
@@ -375,16 +453,8 @@ export default function DashboardPage() {
       });
     }
 
-    if (goals.length === 0) {
-      moves.push({
-        title: "Create a saving goal",
-        detail: "Give your money a destination.",
-        action: () => focusById("goal-name"),
-      });
-    }
-
     return moves.slice(0, 3);
-  }, [budget, expenses.length, assets.length, goals.length]);
+  }, [budget, expenses.length, assets.length]);
 
   async function requireUser() {
     const { data, error } = await supabase.auth.getUser();
@@ -462,7 +532,9 @@ export default function DashboardPage() {
 
       const gq = await supabase
         .from("saving_goals")
-        .select("id,user_id,month,title,target_amount,saved_amount,created_at,updated_at")
+        .select(
+          "id,user_id,month,title,target_amount,saved_amount,created_at,updated_at"
+        )
         .eq("user_id", user.id)
         .eq("month", monthSafe())
         .order("created_at", { ascending: false });
@@ -471,7 +543,10 @@ export default function DashboardPage() {
       setGoals((gq.data || []) as SavingGoalRow[]);
     } catch (e: any) {
       const msg =
-        e?.message || e?.error_description || e?.details || "Something went wrong.";
+        e?.message ||
+        e?.error_description ||
+        e?.details ||
+        "Something went wrong.";
       setError(String(msg));
     } finally {
       setLoading(false);
@@ -484,7 +559,10 @@ export default function DashboardPage() {
   }
 
   async function saveMonthSettings() {
+    if (savingMonthSettings) return;
     setError(null);
+    setSavingMonthSettings(true);
+
     try {
       const user = await requireUser();
       if (!user) return;
@@ -504,17 +582,22 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to save month settings.");
+    } finally {
+      setSavingMonthSettings(false);
     }
   }
 
   async function addExpense() {
+    if (savingExpenseId === "new") return;
     setError(null);
+    setSavingExpenseId("new");
+
     try {
       const user = await requireUser();
       if (!user) return;
 
       const amt = n(expAmount);
-      if (amt <= 0) throw new Error("Enter an expense amount greater than 0.");
+if (amt <= 0) {pushNudge("Enter an expense amount greater than 0.");return;}
 
       const ins = await supabase.from("expenses").insert({
         user_id: user.id,
@@ -532,11 +615,66 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to add expense.");
+    } finally {
+      setSavingExpenseId(null);
+    }
+  }
+
+  function startEditExpense(e: ExpenseRow) {
+    setEditingExpenseId(e.id);
+    setEditExpAmount(String(n(e.amount)));
+    setEditExpCategory(((e.category || "Other") as any) || "Other");
+    setEditExpDesc(e.description || "");
+  }
+
+  function cancelEditExpense() {
+    setEditingExpenseId(null);
+    setEditExpAmount("");
+    setEditExpDesc("");
+    setEditExpCategory("Other");
+  }
+
+  async function saveEditExpense(expenseId: number) {
+    if (savingExpenseId === expenseId) return;
+    setError(null);
+    setSavingExpenseId(expenseId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const amt = n(editExpAmount);
+if (amt <= 0) {
+  pushNudge("Amount must be greater than 0.");
+  return;
+}
+
+      const up = await supabase
+        .from("expenses")
+        .update({
+          amount: amt,
+          category: editExpCategory,
+          description: editExpDesc.trim() || null,
+        })
+        .eq("id", expenseId)
+        .eq("user_id", user.id);
+
+      if (up.error) throw up.error;
+
+      cancelEditExpense();
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to update expense.");
+    } finally {
+      setSavingExpenseId(null);
     }
   }
 
   async function deleteExpense(expenseId: number) {
+    if (savingExpenseId === expenseId) return;
     setError(null);
+    setSavingExpenseId(expenseId);
+
     try {
       const user = await requireUser();
       if (!user) return;
@@ -551,17 +689,22 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete expense.");
+    } finally {
+      setSavingExpenseId(null);
     }
   }
 
   async function addAsset() {
+    if (savingAssetId === "new") return;
     setError(null);
+    setSavingAssetId("new");
+
     try {
       const user = await requireUser();
       if (!user) return;
 
       const amt = n(assetAmount);
-      if (amt <= 0) throw new Error("Enter an asset amount greater than 0.");
+if (amt <= 0) {pushNudge("Enter an asset amount greater than 0.");return;}
 
       const ins = await supabase.from("asset_events").insert({
         user_id: user.id,
@@ -578,11 +721,16 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to add asset.");
+    } finally {
+      setSavingAssetId(null);
     }
   }
 
   async function deleteAsset(assetId: number) {
+    if (savingAssetId === assetId) return;
     setError(null);
+    setSavingAssetId(assetId);
+
     try {
       const user = await requireUser();
       if (!user) return;
@@ -597,57 +745,148 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete asset.");
+    } finally {
+      setSavingAssetId(null);
     }
   }
 
   async function createGoal() {
+  // local (inline) errors only — no global banner for validation
+  setGoalNameErr(null);
+  setGoalTargetErr(null);
+  setError(null);
+
+  try {
+    const user = await requireUser();
+    if (!user) return;
+
+    const name = goalName.trim();
+    const target = n(goalTarget);
+
+    let hasErr = false;
+
+    if (!name) {
+      setGoalNameErr("Enter a goal name.");
+      hasErr = true;
+    }
+
+    if (target <= 0) {
+      setGoalTargetErr("Enter a target amount greater than 0.");
+      hasErr = true;
+    }
+
+    if (hasErr) return;
+
+    const ins = await supabase.from("saving_goals").insert({
+      user_id: user.id,
+      month: monthSafe(),
+      title: name,
+      target_amount: target,
+      saved_amount: 0,
+      updated_at: new Date().toISOString(),
+    });
+
+    if (ins.error) throw ins.error;
+
+    setGoalName("");
+    setGoalTarget("");
+    await load();
+  } catch (e: any) {
+    // only real server/db errors go to the global banner
+    setError(e?.message || "Failed to create goal.");
+  }
+}
+
+  function startEditGoal(g: SavingGoalRow) {
+    setEditingGoalId(g.id);
+    setEditGoalTitle(g.title || "");
+    setEditGoalTarget(String(n(g.target_amount)));
+  }
+
+  function cancelEditGoal() {
+    setEditingGoalId(null);
+    setEditGoalTitle("");
+    setEditGoalTarget("");
+  }
+
+  async function saveEditGoal(goalId: number) {
+    if (savingGoalId === goalId) return;
     setError(null);
+    setSavingGoalId(goalId);
+
     try {
       const user = await requireUser();
       if (!user) return;
 
-      const name = goalName.trim();
-      const target = n(goalTarget);
+      const title = editGoalTitle.trim();
+      const target = n(editGoalTarget);
 
-      if (!name) throw new Error("Enter a goal name.");
-      if (target <= 0) throw new Error("Enter a target amount greater than 0.");
+      if (!title) {
+  pushNudge("Goal title cannot be empty.");
+  return;
+}
+if (target <= 0) {
+  pushNudge("Target must be greater than 0.");
+  return;
+}
 
-      const ins = await supabase.from("saving_goals").insert({
-        user_id: user.id,
-        month: monthSafe(),
-        title: name,
-        target_amount: target,
-        saved_amount: 0,
-        updated_at: new Date().toISOString(),
-      });
+      const up = await supabase
+        .from("saving_goals")
+        .update({
+          title,
+          target_amount: target,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", goalId)
+        .eq("user_id", user.id);
 
-      if (ins.error) throw ins.error;
+      if (up.error) throw up.error;
 
-      setGoalName("");
-      setGoalTarget("");
+      cancelEditGoal();
       await load();
     } catch (e: any) {
-      setError(e?.message || "Failed to create goal.");
+      setError(e?.message || "Failed to update goal.");
+    } finally {
+      setSavingGoalId(null);
     }
   }
 
-  async function addToGoal(goalId: number) {
+  async function addToGoal(goalId: number, amountOverride?: number) {
+    if (savingGoalId === goalId) return;
     setError(null);
+    setSavingGoalId(goalId);
+
     try {
       const user = await requireUser();
       if (!user) return;
 
-      const amt = n(goalAddAmount);
-      if (amt <= 0) throw new Error("Enter an amount greater than 0.");
+      setGoalAddId(goalId);
+
+      const amt =
+  amountOverride != null ? n(amountOverride) : n(goalAddAmount);
+ 
+if (amt <= 0) {
+  pushNudge("Enter an amount greater than 0.");
+  return;
+}
 
       const g = goals.find((x) => x.id === goalId);
       if (!g) throw new Error("Goal not found.");
 
-      const newSaved = n(g.saved_amount) + amt;
+      const p = goalProgress(g);
+      if (p.complete) return;
+
+      const capped = p.target > 0 ? Math.min(amt, p.remaining) : amt;
+      if (capped <= 0) return;
+
+      const newSaved = n(g.saved_amount) + capped;
 
       const up = await supabase
         .from("saving_goals")
-        .update({ saved_amount: newSaved, updated_at: new Date().toISOString() })
+        .update({
+          saved_amount: newSaved,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", goalId)
         .eq("user_id", user.id);
 
@@ -658,11 +897,16 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to add progress.");
+    } finally {
+      setSavingGoalId(null);
     }
   }
 
   async function deleteGoal(goalId: number) {
+    if (savingGoalId === goalId) return;
     setError(null);
+    setSavingGoalId(goalId);
+
     try {
       const user = await requireUser();
       if (!user) return;
@@ -677,6 +921,8 @@ export default function DashboardPage() {
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete goal.");
+    } finally {
+      setSavingGoalId(null);
     }
   }
 
@@ -732,21 +978,37 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {!loading && error && (
-          <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4">
-            <p className="text-sm font-semibold text-red-700">Error</p>
-            <p className="mt-1 text-sm text-red-700">{error}</p>
-          </div>
-        )}
+        {!loading && (
+  <>
+    {error && (
+      <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-2">
+        <p className="text-xs font-semibold text-red-700">Heads up</p>
+        <p className="text-xs text-red-700">{error}</p>
+      </div>
+    )}
+
+    <>
+      ...entire dashboard...
+    </>
+  </>
+)}
+
+{nudge && (
+  <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2">
+    <p className="text-xs font-semibold text-amber-900">Quick fix</p>
+    <p className="text-xs text-amber-900">{nudge}</p>
+  </div>
+)}
+
 
         {!loading && !error && (
           <>
             {/* Overview */}
             <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <Card title="Budget" value={`${currency} ${budget.toLocaleString()}`} />
-              <Card title="Spent" value={`${currency} ${spentTotal.toLocaleString()}`} />
-              <Card title="Remaining" value={`${currency} ${remaining.toLocaleString()}`} />
-              <Card title="Net Worth" value={`${currency} ${netWorth.toLocaleString()}`} />
+              <Card title="Budget" value={fmtMoney(budget)} />
+              <Card title="Spent" value={fmtMoney(spentTotal)} />
+              <Card title="Remaining" value={fmtMoney(remaining)} />
+              <Card title="Net Worth" value={fmtMoney(netWorth)} />
             </div>
 
             {/* Progress + Achievements */}
@@ -776,7 +1038,7 @@ export default function DashboardPage() {
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-[11px] text-slate-500">Avg daily spend</p>
                     <p className="mt-1 text-sm font-extrabold">
-                      {currency} {analytics.avgDailySpend.toLocaleString()}
+                      {fmtMoney(analytics.avgDailySpend)}
                     </p>
                   </div>
 
@@ -790,7 +1052,7 @@ export default function DashboardPage() {
                   <p className="text-xs text-slate-500">
                     Projected spend:{" "}
                     <span className="font-semibold text-slate-700">
-                      {currency} {analytics.projectedSpend.toLocaleString()}
+                      {fmtMoney(analytics.projectedSpend)}
                     </span>{" "}
                     <span className="text-slate-400">(simple estimate)</span>
                   </p>
@@ -807,12 +1069,6 @@ export default function DashboardPage() {
                       className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
                     >
                       + Add asset
-                    </button>
-                    <button
-                      onClick={() => focusById("goal-name")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
-                    >
-                      + Create goal
                     </button>
                   </div>
                 </div>
@@ -853,7 +1109,7 @@ export default function DashboardPage() {
                 )}
 
                 <p className="mt-3 text-xs text-slate-400">
-                  Your next move updates automatically as you log activity.
+                  No setup needed — just log and go.
                 </p>
               </div>
 
@@ -898,9 +1154,10 @@ export default function DashboardPage() {
 
                 <button
                   onClick={saveMonthSettings}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700"
+                  disabled={savingMonthSettings}
+                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
                 >
-                  Save
+                  {savingMonthSettings ? "Saving…" : "Save"}
                 </button>
               </div>
 
@@ -943,9 +1200,10 @@ export default function DashboardPage() {
 
                 <button
                   onClick={addExpense}
-                  className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+                  disabled={savingExpenseId === "new"}
+                  className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60"
                 >
-                  Add expense
+                  {savingExpenseId === "new" ? "Adding…" : "Add expense"}
                 </button>
               </div>
 
@@ -973,9 +1231,10 @@ export default function DashboardPage() {
 
                 <button
                   onClick={addAsset}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700"
+                  disabled={savingAssetId === "new"}
+                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
                 >
-                  Add asset
+                  {savingAssetId === "new" ? "Adding…" : "Add asset"}
                 </button>
               </div>
             </div>
@@ -991,24 +1250,43 @@ export default function DashboardPage() {
 
                 <div className="mt-3 grid gap-2">
                   <input
-                    id="goal-name"
-                    value={goalName}
-                    onChange={(e) => setGoalName(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                    placeholder="Goal name (e.g. Emergency Fund)"
-                  />
+  id="goal-name"
+  value={goalName}
+  onChange={(e) => {
+    setGoalName(e.target.value);
+    if (goalNameErr) setGoalNameErr(null);
+  }}
+  className={`w-full rounded-xl border bg-white px-3 py-2 text-sm
+    ${goalNameErr ? "border-red-300 focus:border-red-400 focus:ring-red-100" : "border-slate-200"}
+  `}
+  placeholder="Goal name (e.g. Emergency Fund)"
+/>
+ 
+{goalNameErr && (
+  <p className="mt-1 text-xs text-red-600">{goalNameErr}</p>
+)}
                   <input
-                    value={goalTarget}
-                    onChange={(e) => setGoalTarget(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                    placeholder="Target amount"
-                    inputMode="decimal"
-                  />
+  value={goalTarget}
+  onChange={(e) => {
+    setGoalTarget(e.target.value);
+    if (goalTargetErr) setGoalTargetErr(null);
+  }}
+  className={`w-full rounded-xl border bg-white px-3 py-2 text-sm
+    ${goalTargetErr ? "border-red-300 focus:border-red-400 focus:ring-red-100" : "border-slate-200"}
+  `}
+  placeholder="Target amount"
+  inputMode="decimal"
+/>
+ 
+{goalTargetErr && (
+  <p className="mt-1 text-xs text-red-600">{goalTargetErr}</p>
+)}
                   <button
                     onClick={createGoal}
-                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700"
+                    disabled={savingGoalCreate}
+                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
                   >
-                    Create goal
+                    {savingGoalCreate ? "Creating…" : "Create goal"}
                   </button>
                 </div>
 
@@ -1019,91 +1297,195 @@ export default function DashboardPage() {
                 ) : (
                   <ul className="mt-4 space-y-2">
                     {sortedGoals.map((g) => {
-                      const { target, saved, pct: p, remaining: rem, complete } = goalProgress(g);
+                      const { target, saved, pct: p, remaining: rem, complete } =
+                        goalProgress(g);
+
+                      const goalBoxClass = complete
+                        ? "rounded-xl border border-emerald-200 bg-emerald-50 p-3"
+                        : "rounded-xl border border-slate-200 p-3";
 
                       const perStep = Math.max(1, Math.round(target * 0.1));
-                      const suggested = complete ? 0 : Math.min(rem, perStep);
+                      const smart = complete ? 0 : Math.min(rem, perStep);
 
                       const goalNudge = complete
-                        ? "Completed ✅"
+                        ? "Completed 🎉"
                         : rem <= 0
                         ? "Add any amount"
-                        : `Next: add ${currency} ${suggested.toLocaleString()}`;
+                        : `Next: add ${fmtMoney(smart)}`;
+
+                      const isEditing = editingGoalId === g.id;
+                      const isGoalBusy = savingGoalId === g.id;
 
                       return (
-                        <li key={g.id} className="rounded-xl border border-slate-200 p-3">
+                        <li key={g.id} className={goalBoxClass}>
                           <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2">
-                                <p className="text-sm font-extrabold">{g.title}</p>
-                                {!complete && (
-                                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                                    Next move
-                                  </span>
-                                )}
-                              </div>
+                            <div className="min-w-0 w-full">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {isEditing ? (
+                                    <input
+                                      value={editGoalTitle}
+                                      onChange={(e) => setEditGoalTitle(e.target.value)}
+                                      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold"
+                                      placeholder="Goal title"
+                                      disabled={isGoalBusy}
+                                    />
+                                  ) : (
+                                    <p className="text-sm font-extrabold truncate">{g.title}</p>
+                                  )}
 
-                              <p className="mt-1 text-xs text-slate-500">
-                                {currency} {saved.toLocaleString()} / {currency}{" "}
-                                {target.toLocaleString()} • {p}%
-                              </p>
+                                  {complete ? (
+                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                                      Completed 🎉
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                      Next move
+                                    </span>
+                                  )}
+                                </div>
 
-                              <p className="mt-1 text-[11px] text-slate-500">{goalNudge}</p>
+                                <div className="flex items-center gap-2">
+                                  {!complete && (
+                                    <>
+                                      {isEditing ? (
+                                        <>
+                                          <button
+                                            onClick={() => saveEditGoal(g.id)}
+                                            disabled={isGoalBusy}
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                            title="Save"
+                                          >
+                                            {isGoalBusy ? "…" : "✅"}
+                                          </button>
+                                          <button
+                                            onClick={cancelEditGoal}
+                                            disabled={isGoalBusy}
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                            title="Cancel"
+                                          >
+                                            ✖️
+                                          </button>
+                                        </>
+                                      ) : (
+                                        <button
+                                          onClick={() => startEditGoal(g)}
+                                          disabled={isGoalBusy}
+                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                          title="Edit goal"
+                                        >
+                                          ✏️
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
 
-                              {!complete && (
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {QUICK_AMOUNTS.map((qa) => (
-                                    <button
-                                      key={qa}
-                                      onClick={() => {
-                                        setGoalAddId(g.id);
-                                        setGoalAddAmount(String(qa));
-                                      }}
-                                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold hover:bg-slate-50"
-                                      title={`Quick add ${qa}`}
-                                    >
-                                      +{qa}
-                                    </button>
-                                  ))}
                                   <button
-                                    onClick={() => jumpToGoalInput(g.id)}
-                                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold hover:bg-slate-50"
+                                    onClick={() => deleteGoal(g.id)}
+                                    disabled={isGoalBusy}
+                                    className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                    title="Delete goal"
                                   >
-                                    Focus
+                                    {isGoalBusy ? "Deleting…" : "🗑️"}
                                   </button>
                                 </div>
-                              )}
-                            </div>
+                              </div>
 
-                            <button
-                              onClick={() => deleteGoal(g.id)}
-                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
-                              title="Delete goal"
-                            >
-                              🗑️
-                            </button>
+                              <div className="mt-2">
+                                {isEditing ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs text-slate-500">Target</span>
+                                    <input
+                                      value={editGoalTarget}
+                                      onChange={(e) => setEditGoalTarget(e.target.value)}
+                                      className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      placeholder="0"
+                                      inputMode="decimal"
+                                      disabled={isGoalBusy}
+                                    />
+                                  </div>
+                                ) : (
+                                  <p className="text-xs text-slate-600">
+                                    {fmtMoney(saved)} / {fmtMoney(target)} • {p}%
+                                  </p>
+                                )}
+
+                                <p className="mt-1 text-[11px] text-slate-600">{goalNudge}</p>
+                              </div>
+                            </div>
                           </div>
 
                           <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                            <div className="h-3 rounded-full bg-emerald-500" style={{ width: `${p}%` }} />
+                            <div
+                              className="h-3 rounded-full bg-emerald-500"
+                              style={{ width: `${p}%` }}
+                            />
                           </div>
 
-                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                            <input
-                              id={`goal-add-${g.id}`}
-                              value={goalAddId === g.id ? goalAddAmount : ""}
-                              onFocus={() => setGoalAddId(g.id)}
-                              onChange={(e) => setGoalAddAmount(e.target.value)}
-                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                              placeholder="Add amount"
-                              inputMode="decimal"
-                            />
-                            <button
-                              onClick={() => addToGoal(g.id)}
-                              className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
-                            >
-                              Add
-                            </button>
+                          {/* Quick/Smart add = preset only (no auto-add) */}
+                          <div className="mt-3 flex flex-col gap-2">
+                            {!complete && (
+                              <div className="flex flex-wrap gap-2">
+                                {QUICK_AMOUNTS.map((amt) => (
+                                  <button
+                                    key={amt}
+                                    type="button"
+                                    onClick={() => presetGoalAmount(g.id, amt)}
+                                    disabled={isGoalBusy}
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  >
+                                    +{fmtMoney(amt)}
+                                  </button>
+                                ))}
+
+                                {rem > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const smartAmt = Math.min(
+                                        rem,
+                                        Math.max(1, Math.round(target * 0.1))
+                                      );
+                                      presetGoalAmount(g.id, smartAmt);
+                                    }}
+                                    disabled={isGoalBusy}
+                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+                                  >
+                                    Smart add
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => jumpToGoalInput(g.id)}
+                                  disabled={isGoalBusy}
+                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                >
+                                  Focus
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Manual add */}
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                              <input
+                                id={`goal-add-${g.id}`}
+                                value={goalAddId === g.id ? goalAddAmount : ""}
+                                onFocus={() => setGoalAddId(g.id)}
+                                onChange={(e) => setGoalAddAmount(e.target.value)}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                                placeholder={complete ? "Completed" : "Add custom amount"}
+                                inputMode="decimal"
+                                disabled={complete || isGoalBusy}
+                              />
+                              <button
+                                onClick={() => addToGoal(g.id)}
+                                disabled={complete || isGoalBusy}
+                                className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60 disabled:hover:bg-slate-900"
+                              >
+                                {complete ? "Completed" : isGoalBusy ? "Adding…" : "Add"}
+                              </button>
+                            </div>
                           </div>
                         </li>
                       );
@@ -1119,37 +1501,107 @@ export default function DashboardPage() {
                   <p className="mt-3 text-sm text-slate-500">No expenses yet.</p>
                 ) : (
                   <ul className="mt-3 space-y-2">
-                    {expenses.slice(0, 10).map((e) => (
-                      <li
-                        key={e.id}
-                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold">
-                            {(e.category || "Other").toUpperCase()}
-                          </p>
-                          <p className="truncate text-xs text-slate-500">
-                            {e.description || "—"}
-                          </p>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {(e.occurred_at || "").slice(0, 10)}
-                          </p>
-                        </div>
+                    {expenses.slice(0, 10).map((e) => {
+                      const isEditing = editingExpenseId === e.id;
+                      const isBusy = savingExpenseId === e.id;
 
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-bold">
-                            {currency} {n(e.amount).toLocaleString()}
-                          </p>
-                          <button
-                            onClick={() => deleteExpense(e.id)}
-                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </li>
-                    ))}
+                      return (
+                        <li
+                          key={e.id}
+                          className="rounded-xl border border-slate-200 px-3 py-2"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 w-full">
+                              {isEditing ? (
+                                <>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <input
+                                      value={editExpAmount}
+                                      onChange={(ev) => setEditExpAmount(ev.target.value)}
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      placeholder="Amount"
+                                      inputMode="decimal"
+                                      disabled={isBusy}
+                                    />
+                                    <select
+                                      value={editExpCategory}
+                                      onChange={(ev) =>
+                                        setEditExpCategory(ev.target.value as any)
+                                      }
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      disabled={isBusy}
+                                    >
+                                      {CATEGORIES.map((c) => (
+                                        <option key={c} value={c}>
+                                          {c}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <input
+                                    value={editExpDesc}
+                                    onChange={(ev) => setEditExpDesc(ev.target.value)}
+                                    className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                    placeholder="Description"
+                                    disabled={isBusy}
+                                  />
+                                  <div className="mt-2 flex gap-2">
+                                    <button
+                                      onClick={() => saveEditExpense(e.id)}
+                                      disabled={isBusy}
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                    >
+                                      {isBusy ? "Saving…" : "Save"}
+                                    </button>
+                                    <button
+                                      onClick={cancelEditExpense}
+                                      disabled={isBusy}
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-sm font-semibold">
+                                    {(e.category || "Other").toUpperCase()}
+                                  </p>
+                                  <p className="truncate text-xs text-slate-500">
+                                    {e.description || "—"}
+                                  </p>
+                                  <p className="mt-1 text-[11px] text-slate-400">
+                                    {(e.occurred_at || "").slice(0, 10)}
+                                  </p>
+                                </>
+                              )}
+                            </div>
+
+                            {!isEditing && (
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-bold">{fmtMoney(n(e.amount))}</p>
+                                <button
+                                  onClick={() => startEditExpense(e)}
+                                  disabled={isBusy}
+                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  title="Edit"
+                                >
+                                  ✏️
+                                </button>
+                                <button
+                                  onClick={() => deleteExpense(e.id)}
+                                  disabled={isBusy}
+                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  title="Delete"
+                                >
+                                  {isBusy ? "…" : "🗑️"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
 
@@ -1158,35 +1610,36 @@ export default function DashboardPage() {
                   <p className="mt-3 text-sm text-slate-500">No assets yet.</p>
                 ) : (
                   <ul className="mt-3 space-y-2">
-                    {assets.slice(0, 10).map((a) => (
-                      <li
-                        key={a.id}
-                        className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold">ASSET</p>
-                          <p className="truncate text-xs text-slate-500">
-                            {a.note || "—"}
-                          </p>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {(a.created_at || "").slice(0, 10)}
-                          </p>
-                        </div>
+                    {assets.slice(0, 10).map((a) => {
+                      const isBusy = savingAssetId === a.id;
 
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-bold">
-                            {currency} {n(a.amount).toLocaleString()}
-                          </p>
-                          <button
-                            onClick={() => deleteAsset(a.id)}
-                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50"
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </li>
-                    ))}
+                      return (
+                        <li
+                          key={a.id}
+                          className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold">ASSET</p>
+                            <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
+                            <p className="mt-1 text-[11px] text-slate-400">
+                              {(a.created_at || "").slice(0, 10)}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-bold">{fmtMoney(n(a.amount))}</p>
+                            <button
+                              onClick={() => deleteAsset(a.id)}
+                              disabled={isBusy}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                              title="Delete"
+                            >
+                              {isBusy ? "…" : "🗑️"}
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
