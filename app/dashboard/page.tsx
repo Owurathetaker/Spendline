@@ -122,11 +122,12 @@ export default function DashboardPage() {
   const [goals, setGoals] = useState<SavingGoalRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [nudge, setNudge] = useState<string | null>(null);
- 
-function pushNudge(msg: string) {
-  setNudge(msg);
-  window.setTimeout(() => setNudge(null), 2500);
-}
+
+  // UI polish: nudge should be accessible + non-blocking
+  function pushNudge(msg: string) {
+    setNudge(msg);
+    window.setTimeout(() => setNudge(null), 2500);
+  }
 
   // Inputs
   const [currencyInput, setCurrencyInput] = useState("GHS");
@@ -597,7 +598,10 @@ function pushNudge(msg: string) {
       if (!user) return;
 
       const amt = n(expAmount);
-if (amt <= 0) {pushNudge("Enter an expense amount greater than 0.");return;}
+      if (amt <= 0) {
+        pushNudge("Enter an expense amount greater than 0.");
+        return;
+      }
 
       const ins = await supabase.from("expenses").insert({
         user_id: user.id,
@@ -644,10 +648,10 @@ if (amt <= 0) {pushNudge("Enter an expense amount greater than 0.");return;}
       if (!user) return;
 
       const amt = n(editExpAmount);
-if (amt <= 0) {
-  pushNudge("Amount must be greater than 0.");
-  return;
-}
+      if (amt <= 0) {
+        pushNudge("Amount must be greater than 0.");
+        return;
+      }
 
       const up = await supabase
         .from("expenses")
@@ -704,7 +708,10 @@ if (amt <= 0) {
       if (!user) return;
 
       const amt = n(assetAmount);
-if (amt <= 0) {pushNudge("Enter an asset amount greater than 0.");return;}
+      if (amt <= 0) {
+        pushNudge("Enter an asset amount greater than 0.");
+        return;
+      }
 
       const ins = await supabase.from("asset_events").insert({
         user_id: user.id,
@@ -751,51 +758,55 @@ if (amt <= 0) {pushNudge("Enter an asset amount greater than 0.");return;}
   }
 
   async function createGoal() {
-  // local (inline) errors only — no global banner for validation
-  setGoalNameErr(null);
-  setGoalTargetErr(null);
-  setError(null);
+    // local (inline) errors only — no global banner for validation
+    setGoalNameErr(null);
+    setGoalTargetErr(null);
+    setError(null);
 
-  try {
-    const user = await requireUser();
-    if (!user) return;
+    if (savingGoalCreate) return;
+    setSavingGoalCreate(true);
 
-    const name = goalName.trim();
-    const target = n(goalTarget);
+    try {
+      const user = await requireUser();
+      if (!user) return;
 
-    let hasErr = false;
+      const name = goalName.trim();
+      const target = n(goalTarget);
 
-    if (!name) {
-      setGoalNameErr("Enter a goal name.");
-      hasErr = true;
+      let hasErr = false;
+
+      if (!name) {
+        setGoalNameErr("Enter a goal name.");
+        hasErr = true;
+      }
+
+      if (target <= 0) {
+        setGoalTargetErr("Enter a target amount greater than 0.");
+        hasErr = true;
+      }
+
+      if (hasErr) return;
+
+      const ins = await supabase.from("saving_goals").insert({
+        user_id: user.id,
+        month: monthSafe(),
+        title: name,
+        target_amount: target,
+        saved_amount: 0,
+        updated_at: new Date().toISOString(),
+      });
+
+      if (ins.error) throw ins.error;
+
+      setGoalName("");
+      setGoalTarget("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to create goal.");
+    } finally {
+      setSavingGoalCreate(false);
     }
-
-    if (target <= 0) {
-      setGoalTargetErr("Enter a target amount greater than 0.");
-      hasErr = true;
-    }
-
-    if (hasErr) return;
-
-    const ins = await supabase.from("saving_goals").insert({
-      user_id: user.id,
-      month: monthSafe(),
-      title: name,
-      target_amount: target,
-      saved_amount: 0,
-      updated_at: new Date().toISOString(),
-    });
-
-    if (ins.error) throw ins.error;
-
-    setGoalName("");
-    setGoalTarget("");
-    await load();
-  } catch (e: any) {
-    // only real server/db errors go to the global banner
-    setError(e?.message || "Failed to create goal.");
   }
-}
 
   function startEditGoal(g: SavingGoalRow) {
     setEditingGoalId(g.id);
@@ -822,13 +833,13 @@ if (amt <= 0) {pushNudge("Enter an asset amount greater than 0.");return;}
       const target = n(editGoalTarget);
 
       if (!title) {
-  pushNudge("Goal title cannot be empty.");
-  return;
-}
-if (target <= 0) {
-  pushNudge("Target must be greater than 0.");
-  return;
-}
+        pushNudge("Goal title cannot be empty.");
+        return;
+      }
+      if (target <= 0) {
+        pushNudge("Target must be greater than 0.");
+        return;
+      }
 
       const up = await supabase
         .from("saving_goals")
@@ -862,13 +873,12 @@ if (target <= 0) {
 
       setGoalAddId(goalId);
 
-      const amt =
-  amountOverride != null ? n(amountOverride) : n(goalAddAmount);
- 
-if (amt <= 0) {
-  pushNudge("Enter an amount greater than 0.");
-  return;
-}
+      const amt = amountOverride != null ? n(amountOverride) : n(goalAddAmount);
+
+      if (amt <= 0) {
+        pushNudge("Enter an amount greater than 0.");
+        return;
+      }
 
       const g = goals.find((x) => x.id === goalId);
       if (!g) throw new Error("Goal not found.");
@@ -932,7 +942,7 @@ if (amt <= 0) {
   }, [month]);
 
   return (
-    <main className="min-h-screen bg-white text-slate-900">
+    <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl px-4 py-8">
         {/* Header */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -949,8 +959,9 @@ if (amt <= 0) {
               <p className="text-sm font-semibold">{email || "—"}</p>
             </div>
             <button
+              type="button"
               onClick={logout}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold hover:bg-slate-50"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm transition hover:bg-slate-50 hover:shadow focus:outline-none focus:ring-2 focus:ring-slate-200"
             >
               Log out
             </button>
@@ -958,51 +969,115 @@ if (amt <= 0) {
         </div>
 
         {/* Month picker */}
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+        <div className="mt-6 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-xs text-slate-500">Month</p>
             <p className="text-sm font-semibold">{monthSafe()}</p>
           </div>
 
           <input
+            aria-label="Select month"
             type="month"
             value={month}
             onChange={(e) => setMonth(e.target.value)}
-            className="w-full sm:w-auto rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200 sm:w-auto"
           />
         </div>
 
+        {/* Skeleton loader */}
         {loading && (
-          <div className="mt-6 rounded-2xl border border-slate-200 p-4">
-            <p className="text-sm text-slate-600">Loading dashboard…</p>
+          <div className="mt-6 space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="animate-pulse space-y-3">
+                <div className="h-4 w-40 rounded bg-slate-100" />
+                <div className="h-8 w-full rounded bg-slate-100" />
+                <div className="h-8 w-full rounded bg-slate-100" />
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                >
+                  <div className="animate-pulse space-y-3">
+                    <div className="h-3 w-16 rounded bg-slate-100" />
+                    <div className="h-6 w-28 rounded bg-slate-100" />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="animate-pulse space-y-3">
+                  <div className="h-4 w-56 rounded bg-slate-100" />
+                  <div className="h-3 w-full rounded bg-slate-100" />
+                  <div className="h-3 w-3/4 rounded bg-slate-100" />
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="animate-pulse space-y-3">
+                  <div className="h-4 w-32 rounded bg-slate-100" />
+                  <div className="h-3 w-full rounded bg-slate-100" />
+                  <div className="h-3 w-2/3 rounded bg-slate-100" />
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
         {!loading && (
-  <>
-    {error && (
-      <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-2">
-        <p className="text-xs font-semibold text-red-700">Heads up</p>
-        <p className="text-xs text-red-700">{error}</p>
-      </div>
-    )}
-
-    <>
-      ...entire dashboard...
-    </>
-  </>
-)}
-
-{nudge && (
-  <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2">
-    <p className="text-xs font-semibold text-amber-900">Quick fix</p>
-    <p className="text-xs text-amber-900">{nudge}</p>
-  </div>
-)}
-
-
-        {!loading && !error && (
           <>
+            {error && (
+              <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-2 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-red-700">Heads up</p>
+                    <p className="text-xs text-red-700">{error}</p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setError(null)}
+                    className="rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 transition hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-200"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Accessible toast */}
+            {nudge && (
+              <div
+                className="fixed bottom-4 right-4 z-50 w-[92vw] max-w-sm"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-md">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-amber-900">
+                        Quick fix
+                      </p>
+                      <p className="mt-0.5 text-xs text-amber-900">{nudge}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setNudge(null)}
+                      className="rounded-lg border border-amber-200 bg-white px-2 py-1 text-[11px] font-semibold text-amber-900 transition hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                    >
+                      OK
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Overview */}
             <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <Card title="Budget" value={fmtMoney(budget)} />
@@ -1013,7 +1088,7 @@ if (amt <= 0) {
 
             {/* Progress + Achievements */}
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
-              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-bold">Monthly Budget Progress</p>
                   <p className="text-sm text-slate-600">{progressPct}%</p>
@@ -1044,7 +1119,9 @@ if (amt <= 0) {
 
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-[11px] text-slate-500">Days left</p>
-                    <p className="mt-1 text-sm font-extrabold">{analytics.daysLeft}</p>
+                    <p className="mt-1 text-sm font-extrabold">
+                      {analytics.daysLeft}
+                    </p>
                   </div>
                 </div>
 
@@ -1059,14 +1136,16 @@ if (amt <= 0) {
 
                   <div className="flex flex-wrap gap-2">
                     <button
+                      type="button"
                       onClick={() => focusById("exp-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
                     >
                       + Log expense
                     </button>
                     <button
+                      type="button"
                       onClick={() => focusById("asset-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
                     >
                       + Add asset
                     </button>
@@ -1080,12 +1159,15 @@ if (amt <= 0) {
                     <div className="mt-2 grid gap-2 sm:grid-cols-3">
                       {nextMoves.map((m, i) => (
                         <button
+                          type="button"
                           key={i}
                           onClick={m.action}
-                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 hover:bg-slate-100"
+                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
                         >
                           <div className="text-sm font-semibold">{m.title}</div>
-                          <div className="mt-1 text-xs text-slate-500">{m.detail}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {m.detail}
+                          </div>
                         </button>
                       ))}
                     </div>
@@ -1095,12 +1177,15 @@ if (amt <= 0) {
                 {/* Top goal next move */}
                 {nextMove && (
                   <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <p className="text-xs font-bold text-slate-700">Goal next move</p>
+                    <p className="text-xs font-bold text-slate-700">
+                      Goal next move
+                    </p>
                     <p className="mt-1 text-xs text-slate-600">{nextMove.line}</p>
                     {!goalProgress(nextMove.goal).complete && (
                       <button
+                        type="button"
                         onClick={() => jumpToGoalInput(nextMove.goal.id)}
-                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800"
+                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
                       >
                         Add to this goal
                       </button>
@@ -1113,14 +1198,19 @@ if (amt <= 0) {
                 </p>
               </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm font-bold">Achievements</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <SectionTitle title="Achievements" subtitle="Small wins = momentum." />
                 <ul className="mt-3 space-y-2 text-sm text-slate-700">
                   {achievements.map((a, i) => (
-                    <li key={i} className="flex items-start justify-between gap-3">
+                    <li
+                      key={i}
+                      className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"
+                    >
                       <div className="min-w-0">
                         <div className="font-semibold">{a.title}</div>
-                        <div className="text-xs text-slate-500 truncate">{a.detail}</div>
+                        <div className="text-xs text-slate-500 truncate">
+                          {a.detail}
+                        </div>
                       </div>
                     </li>
                   ))}
@@ -1131,55 +1221,85 @@ if (amt <= 0) {
             {/* Controls */}
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
               {/* Month settings */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <p className="text-sm font-bold">Month settings</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <SectionTitle
+                  title="Month settings"
+                  subtitle="Currency + budget for this month."
+                />
 
-                <label className="mt-3 block text-xs text-slate-500">Currency</label>
+                <label className="mt-3 block text-xs text-slate-500">
+                  Currency
+                </label>
                 <input
                   value={currencyInput}
                   onChange={(e) => setCurrencyInput(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
                   placeholder="GHS"
                 />
 
                 <label className="mt-3 block text-xs text-slate-500">Budget</label>
-                <input
-                  id="budget-input"
-                  value={budgetInput}
-                  onChange={(e) => setBudgetInput(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  placeholder="0"
-                  inputMode="decimal"
-                />
+
+                <div className="mt-1">
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                      {symbol}
+                    </span>
+                    <input
+                      id="budget-input"
+                      value={budgetInput}
+                      onChange={(e) => setBudgetInput(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Monthly cap (rough is fine).
+                  </p>
+                </div>
 
                 <button
+                  type="button"
                   onClick={saveMonthSettings}
                   disabled={savingMonthSettings}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
+                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                 >
                   {savingMonthSettings ? "Saving…" : "Save"}
                 </button>
               </div>
 
               {/* Add expense */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <p className="text-sm font-bold">Log expense</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <SectionTitle title="Log expense" subtitle="Track money that left today." />
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
-                <input
-                  id="exp-amount"
-                  value={expAmount}
-                  onChange={(e) => setExpAmount(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  placeholder="0"
-                  inputMode="decimal"
-                />
 
-                <label className="mt-3 block text-xs text-slate-500">Category</label>
+                <div className="mt-1">
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                      {symbol}
+                    </span>
+                    <input
+                      id="exp-amount"
+                      value={expAmount}
+                      onChange={(e) => setExpAmount(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Numbers only (e.g. 1500).
+                  </p>
+                </div>
+
+                <label className="mt-3 block text-xs text-slate-500">
+                  Category
+                </label>
                 <select
                   value={expCategory}
                   onChange={(e) => setExpCategory(e.target.value as any)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
                 >
                   {CATEGORIES.map((c) => (
                     <option key={c} value={c}>
@@ -1194,45 +1314,60 @@ if (amt <= 0) {
                 <input
                   value={expDesc}
                   onChange={(e) => setExpDesc(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
                   placeholder="e.g. lunch"
                 />
 
                 <button
+                  type="button"
                   onClick={addExpense}
                   disabled={savingExpenseId === "new"}
-                  className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60"
+                  className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-300"
                 >
                   {savingExpenseId === "new" ? "Adding…" : "Add expense"}
                 </button>
               </div>
 
               {/* Add asset */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <p className="text-sm font-bold">Stack asset</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <SectionTitle title="Stack asset" subtitle="Record money that stayed." />
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
-                <input
-                  id="asset-amount"
-                  value={assetAmount}
-                  onChange={(e) => setAssetAmount(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  placeholder="0"
-                  inputMode="decimal"
-                />
 
-                <label className="mt-3 block text-xs text-slate-500">Note (optional)</label>
+                <div className="mt-1">
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                      {symbol}
+                    </span>
+                    <input
+                      id="asset-amount"
+                      value={assetAmount}
+                      onChange={(e) => setAssetAmount(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Cash, savings, investments—anything counts.
+                  </p>
+                </div>
+
+                <label className="mt-3 block text-xs text-slate-500">
+                  Note (optional)
+                </label>
                 <input
                   value={assetNote}
                   onChange={(e) => setAssetNote(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
                   placeholder="e.g. savings"
                 />
 
                 <button
+                  type="button"
                   onClick={addAsset}
                   disabled={savingAssetId === "new"}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
+                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                 >
                   {savingAssetId === "new" ? "Adding…" : "Add asset"}
                 </button>
@@ -1244,56 +1379,88 @@ if (amt <= 0) {
               {/* Goals */}
               <div
                 id="goals-section"
-                className="rounded-2xl border border-slate-200 bg-white p-4"
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
               >
-                <p className="text-sm font-bold">Saving goals</p>
+                <SectionTitle
+                  title="Saving goals"
+                  subtitle="Progress is automatic. You just add."
+                />
 
                 <div className="mt-3 grid gap-2">
                   <input
-  id="goal-name"
-  value={goalName}
-  onChange={(e) => {
-    setGoalName(e.target.value);
-    if (goalNameErr) setGoalNameErr(null);
-  }}
-  className={`w-full rounded-xl border bg-white px-3 py-2 text-sm
-    ${goalNameErr ? "border-red-300 focus:border-red-400 focus:ring-red-100" : "border-slate-200"}
-  `}
-  placeholder="Goal name (e.g. Emergency Fund)"
-/>
- 
-{goalNameErr && (
-  <p className="mt-1 text-xs text-red-600">{goalNameErr}</p>
-)}
-                  <input
-  value={goalTarget}
-  onChange={(e) => {
-    setGoalTarget(e.target.value);
-    if (goalTargetErr) setGoalTargetErr(null);
-  }}
-  className={`w-full rounded-xl border bg-white px-3 py-2 text-sm
-    ${goalTargetErr ? "border-red-300 focus:border-red-400 focus:ring-red-100" : "border-slate-200"}
-  `}
-  placeholder="Target amount"
-  inputMode="decimal"
-/>
- 
-{goalTargetErr && (
-  <p className="mt-1 text-xs text-red-600">{goalTargetErr}</p>
-)}
+                    id="goal-name"
+                    value={goalName}
+                    onChange={(e) => {
+                      setGoalName(e.target.value);
+                      if (goalNameErr) setGoalNameErr(null);
+                    }}
+                    aria-invalid={!!goalNameErr}
+                    aria-describedby={goalNameErr ? "goal-name-err" : undefined}
+                    className={`w-full rounded-xl border bg-white px-3 py-2 text-sm shadow-sm transition focus:outline-none focus:ring-2
+                      ${
+                        goalNameErr
+                          ? "border-red-300 focus:ring-red-200"
+                          : "border-slate-200 focus:ring-slate-200"
+                      }`}
+                    placeholder="Goal name (e.g. Emergency Fund)"
+                  />
+
+                  {goalNameErr && (
+                    <p
+                      id="goal-name-err"
+                      className="mt-1 text-xs text-red-600"
+                      role="alert"
+                    >
+                      {goalNameErr}
+                    </p>
+                  )}
+
+                  <div className="mt-1">
+                    <div className="relative">
+                      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                        {symbol}
+                      </span>
+                      <input
+                        id="goal-target"
+                        value={goalTarget}
+                        onChange={(e) => {
+                          setGoalTarget(e.target.value);
+                          if (goalTargetErr) setGoalTargetErr(null);
+                        }}
+                        aria-invalid={!!goalTargetErr}
+                        className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
+                          ${
+                            goalTargetErr
+                              ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
+                              : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                          }`}
+                        placeholder="Target amount"
+                        inputMode="decimal"
+                      />
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Set the finish line. You can edit later.
+                    </p>
+                  </div>
+
+                  {goalTargetErr && (
+                    <p className="mt-1 text-xs text-red-600" role="alert">
+                      {goalTargetErr}
+                    </p>
+                  )}
+
                   <button
+                    type="button"
                     onClick={createGoal}
                     disabled={savingGoalCreate}
-                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
+                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                   >
                     {savingGoalCreate ? "Creating…" : "Create goal"}
                   </button>
                 </div>
 
                 {goals.length === 0 ? (
-                  <p className="mt-4 text-sm text-slate-500">
-                    No goals yet. Create one above.
-                  </p>
+                  <EmptyState text="No goals yet. Create one above to start tracking progress." />
                 ) : (
                   <ul className="mt-4 space-y-2">
                     {sortedGoals.map((g) => {
@@ -1302,7 +1469,7 @@ if (amt <= 0) {
 
                       const goalBoxClass = complete
                         ? "rounded-xl border border-emerald-200 bg-emerald-50 p-3"
-                        : "rounded-xl border border-slate-200 p-3";
+                        : "rounded-xl border border-slate-200 bg-white p-3 hover:bg-slate-50 transition";
 
                       const perStep = Math.max(1, Math.round(target * 0.1));
                       const smart = complete ? 0 : Math.min(rem, perStep);
@@ -1325,13 +1492,17 @@ if (amt <= 0) {
                                   {isEditing ? (
                                     <input
                                       value={editGoalTitle}
-                                      onChange={(e) => setEditGoalTitle(e.target.value)}
-                                      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold"
+                                      onChange={(e) =>
+                                        setEditGoalTitle(e.target.value)
+                                      }
+                                      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Goal title"
                                       disabled={isGoalBusy}
                                     />
                                   ) : (
-                                    <p className="text-sm font-extrabold truncate">{g.title}</p>
+                                    <p className="text-sm font-extrabold truncate">
+                                      {g.title}
+                                    </p>
                                   )}
 
                                   {complete ? (
@@ -1351,17 +1522,21 @@ if (amt <= 0) {
                                       {isEditing ? (
                                         <>
                                           <button
+                                            type="button"
                                             onClick={() => saveEditGoal(g.id)}
                                             disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                            aria-label="Save goal"
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                             title="Save"
                                           >
                                             {isGoalBusy ? "…" : "✅"}
                                           </button>
                                           <button
+                                            type="button"
                                             onClick={cancelEditGoal}
                                             disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                            aria-label="Cancel goal edit"
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                             title="Cancel"
                                           >
                                             ✖️
@@ -1369,9 +1544,11 @@ if (amt <= 0) {
                                         </>
                                       ) : (
                                         <button
+                                          type="button"
                                           onClick={() => startEditGoal(g)}
                                           disabled={isGoalBusy}
-                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                          aria-label="Edit goal"
+                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                           title="Edit goal"
                                         >
                                           ✏️
@@ -1381,9 +1558,11 @@ if (amt <= 0) {
                                   )}
 
                                   <button
+                                    type="button"
                                     onClick={() => deleteGoal(g.id)}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                    aria-label="Delete goal"
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     title="Delete goal"
                                   >
                                     {isGoalBusy ? "Deleting…" : "🗑️"}
@@ -1394,23 +1573,35 @@ if (amt <= 0) {
                               <div className="mt-2">
                                 {isEditing ? (
                                   <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-500">Target</span>
+                                    <span className="text-xs text-slate-500">
+                                      Target
+                                    </span>
                                     <input
                                       value={editGoalTarget}
-                                      onChange={(e) => setEditGoalTarget(e.target.value)}
-                                      className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      onChange={(e) =>
+                                        setEditGoalTarget(e.target.value)
+                                      }
+                                      className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="0"
                                       inputMode="decimal"
                                       disabled={isGoalBusy}
                                     />
                                   </div>
                                 ) : (
-                                  <p className="text-xs text-slate-600">
-                                    {fmtMoney(saved)} / {fmtMoney(target)} • {p}%
-                                  </p>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <p className="text-xs text-slate-600">
+                                      {fmtMoney(saved)} / {fmtMoney(target)}
+                                    </p>
+
+                                    <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-700">
+                                      {p}%
+                                    </span>
+                                  </div>
                                 )}
 
-                                <p className="mt-1 text-[11px] text-slate-600">{goalNudge}</p>
+                                <p className="mt-1 text-[11px] text-slate-600">
+                                  {goalNudge}
+                                </p>
                               </div>
                             </div>
                           </div>
@@ -1432,7 +1623,7 @@ if (amt <= 0) {
                                     type="button"
                                     onClick={() => presetGoalAmount(g.id, amt)}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   >
                                     +{fmtMoney(amt)}
                                   </button>
@@ -1449,7 +1640,7 @@ if (amt <= 0) {
                                       presetGoalAmount(g.id, smartAmt);
                                     }}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                                   >
                                     Smart add
                                   </button>
@@ -1459,7 +1650,7 @@ if (amt <= 0) {
                                   type="button"
                                   onClick={() => jumpToGoalInput(g.id)}
                                   disabled={isGoalBusy}
-                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                 >
                                   Focus
                                 </button>
@@ -1470,20 +1661,26 @@ if (amt <= 0) {
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                               <input
                                 id={`goal-add-${g.id}`}
+                                aria-label="Add custom amount to goal"
                                 value={goalAddId === g.id ? goalAddAmount : ""}
                                 onFocus={() => setGoalAddId(g.id)}
                                 onChange={(e) => setGoalAddAmount(e.target.value)}
-                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm transition disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                 placeholder={complete ? "Completed" : "Add custom amount"}
                                 inputMode="decimal"
                                 disabled={complete || isGoalBusy}
                               />
                               <button
+                                type="button"
                                 onClick={() => addToGoal(g.id)}
                                 disabled={complete || isGoalBusy}
-                                className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60 disabled:hover:bg-slate-900"
+                                className="w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300 sm:w-auto"
                               >
-                                {complete ? "Completed" : isGoalBusy ? "Adding…" : "Add"}
+                                {complete
+                                  ? "Completed"
+                                  : isGoalBusy
+                                  ? "Adding…"
+                                  : "Add"}
                               </button>
                             </div>
                           </div>
@@ -1495,10 +1692,10 @@ if (amt <= 0) {
               </div>
 
               {/* Expenses + assets lists */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <p className="text-sm font-bold">Recent expenses</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <SectionTitle title="Recent expenses" subtitle="Latest 10 entries." />
                 {expenses.length === 0 ? (
-                  <p className="mt-3 text-sm text-slate-500">No expenses yet.</p>
+                  <EmptyState text="No expenses yet. Log your first one to start the month." />
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {expenses.slice(0, 10).map((e) => {
@@ -1508,7 +1705,7 @@ if (amt <= 0) {
                       return (
                         <li
                           key={e.id}
-                          className="rounded-xl border border-slate-200 px-3 py-2"
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 transition hover:bg-slate-50"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0 w-full">
@@ -1517,8 +1714,10 @@ if (amt <= 0) {
                                   <div className="grid grid-cols-2 gap-2">
                                     <input
                                       value={editExpAmount}
-                                      onChange={(ev) => setEditExpAmount(ev.target.value)}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      onChange={(ev) =>
+                                        setEditExpAmount(ev.target.value)
+                                      }
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Amount"
                                       inputMode="decimal"
                                       disabled={isBusy}
@@ -1528,7 +1727,7 @@ if (amt <= 0) {
                                       onChange={(ev) =>
                                         setEditExpCategory(ev.target.value as any)
                                       }
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       disabled={isBusy}
                                     >
                                       {CATEGORIES.map((c) => (
@@ -1541,22 +1740,24 @@ if (amt <= 0) {
                                   <input
                                     value={editExpDesc}
                                     onChange={(ev) => setEditExpDesc(ev.target.value)}
-                                    className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                    className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     placeholder="Description"
                                     disabled={isBusy}
                                   />
                                   <div className="mt-2 flex gap-2">
                                     <button
+                                      type="button"
                                       onClick={() => saveEditExpense(e.id)}
                                       disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     >
                                       {isBusy ? "Saving…" : "Save"}
                                     </button>
                                     <button
+                                      type="button"
                                       onClick={cancelEditExpense}
                                       disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     >
                                       Cancel
                                     </button>
@@ -1579,19 +1780,25 @@ if (amt <= 0) {
 
                             {!isEditing && (
                               <div className="flex items-center gap-2">
-                                <p className="text-sm font-bold">{fmtMoney(n(e.amount))}</p>
+                                <p className="text-sm font-bold">
+                                  {fmtMoney(n(e.amount))}
+                                </p>
                                 <button
+                                  type="button"
                                   onClick={() => startEditExpense(e)}
                                   disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  aria-label="Edit expense"
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   title="Edit"
                                 >
                                   ✏️
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => deleteExpense(e.id)}
                                   disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                                  aria-label="Delete expense"
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   title="Delete"
                                 >
                                   {isBusy ? "…" : "🗑️"}
@@ -1605,9 +1812,12 @@ if (amt <= 0) {
                   </ul>
                 )}
 
-                <p className="mt-6 text-sm font-bold">Recent assets</p>
+                <div className="mt-6">
+                  <SectionTitle title="Recent assets" subtitle="Latest 10 entries." />
+                </div>
+
                 {assets.length === 0 ? (
-                  <p className="mt-3 text-sm text-slate-500">No assets yet.</p>
+                  <EmptyState text="No assets yet. Add any asset to start stacking." />
                 ) : (
                   <ul className="mt-3 space-y-2">
                     {assets.slice(0, 10).map((a) => {
@@ -1616,22 +1826,28 @@ if (amt <= 0) {
                       return (
                         <li
                           key={a.id}
-                          className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                          className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 transition hover:bg-slate-50"
                         >
                           <div className="min-w-0">
                             <p className="text-sm font-semibold">ASSET</p>
-                            <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
+                            <p className="truncate text-xs text-slate-500">
+                              {a.note || "—"}
+                            </p>
                             <p className="mt-1 text-[11px] text-slate-400">
                               {(a.created_at || "").slice(0, 10)}
                             </p>
                           </div>
 
                           <div className="flex items-center gap-2">
-                            <p className="text-sm font-bold">{fmtMoney(n(a.amount))}</p>
+                            <p className="text-sm font-bold">
+                              {fmtMoney(n(a.amount))}
+                            </p>
                             <button
+                              type="button"
                               onClick={() => deleteAsset(a.id)}
                               disabled={isBusy}
-                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                              aria-label="Delete asset"
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                               title="Delete"
                             >
                               {isBusy ? "…" : "🗑️"}
@@ -1667,9 +1883,33 @@ if (amt <= 0) {
 
 function Card({ title, value }: { title: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:shadow hover:bg-slate-50">
       <p className="text-xs text-slate-500">{title}</p>
       <p className="mt-1 text-lg font-extrabold tracking-tight">{value}</p>
+    </div>
+  );
+}
+
+function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-sm font-bold text-slate-900">{title}</p>
+        {subtitle ? (
+          <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full bg-slate-300" />
+        <p className="text-sm text-slate-500">{text}</p>
+      </div>
     </div>
   );
 }
