@@ -108,6 +108,35 @@ function monthCompare(a: string, b: string) {
   const vb = pb.y * 100 + pb.m;
   return va === vb ? 0 : va < vb ? -1 : 1;
 }
+function sanitizeMoneyInput(v: string) {
+  // keep digits + at most one dot
+  const cleaned = v.replace(/[^0-9.]/g, "");
+  const parts = cleaned.split(".");
+  const head = parts[0] ?? "";
+  const tail = parts.slice(1).join(""); // merge extra dots
+  return tail.length ? `${head}.${tail}` : head;
+}
+
+function formatMoneyInput(v: string) {
+  const raw = String(v || "").replace(/,/g, "");
+  if (!raw) return "";
+  const parts = raw.split(".");
+  const intPart = parts[0] || "0";
+  const decPart = parts[1]; // keep user decimals as typed
+  const intFmt = Number(intPart).toLocaleString();
+  return decPart != null && decPart !== "" ? `${intFmt}.${decPart}` : intFmt;
+}
+
+function toNumberFromMoneyInput(v: string) {
+  const num = Number(String(v || "").replace(/,/g, ""));
+  return Number.isFinite(num) ? num : 0;
+}
+
+function isValidYM(ym: string) {
+  // YYYY-MM
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(ym);
+}
+
 
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -198,8 +227,9 @@ export default function DashboardPage() {
   }, [spentTotal, budget]);
 
   function monthSafe() {
-    return typeof month === "string" && month.trim() ? month : ymNow();
-  }
+  const m = typeof month === "string" ? month.trim() : "";
+  return isValidYM(m) ? m : ymNow();
+}
 
   // Goal helpers (safe)
   function goalProgress(g: SavingGoalRow) {
@@ -570,7 +600,7 @@ export default function DashboardPage() {
 
       const patch = {
         currency: currencyInput.toUpperCase(),
-        budget: n(budgetInput),
+        budget: toNumberFromMoneyInput(budgetInput),
       };
 
       const up = await supabase
@@ -597,7 +627,7 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const amt = n(expAmount);
+      const amt = toNumberFromMoneyInput(expAmount);
       if (amt <= 0) {
         pushNudge("Enter an expense amount greater than 0.");
         return;
@@ -707,7 +737,7 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const amt = n(assetAmount);
+      const amt = toNumberFromMoneyInput(assetAmount);
       if (amt <= 0) {
         pushNudge("Enter an asset amount greater than 0.");
         return;
@@ -772,7 +802,7 @@ export default function DashboardPage() {
       if (!user) return;
 
       const name = goalName.trim();
-      const target = n(goalTarget);
+      const target = toNumberFromMoneyInput(goalTarget);
 
       let hasErr = false;
 
@@ -1241,13 +1271,15 @@ export default function DashboardPage() {
                       {symbol}
                     </span>
                     <input
-                      id="budget-input"
-                      value={budgetInput}
-                      onChange={(e) => setBudgetInput(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
+  id="budget-input"
+  value={budgetInput}
+  onChange={(e) => setBudgetInput(sanitizeMoneyInput(e.target.value))}
+  onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
+  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
+    focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+  placeholder="0"
+  inputMode="decimal"
+/>
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Monthly cap (rough is fine).
@@ -1278,13 +1310,15 @@ export default function DashboardPage() {
                       {symbol}
                     </span>
                     <input
-                      id="exp-amount"
-                      value={expAmount}
-                      onChange={(e) => setExpAmount(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
+  id="exp-amount"
+  value={expAmount}
+  onChange={(e) => setExpAmount(sanitizeMoneyInput(e.target.value))}
+  onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
+  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
+    focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
+  placeholder="0"
+  inputMode="decimal"
+/>
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Numbers only (e.g. 1500).
@@ -1340,13 +1374,15 @@ export default function DashboardPage() {
                       {symbol}
                     </span>
                     <input
-                      id="asset-amount"
-                      value={assetAmount}
-                      onChange={(e) => setAssetAmount(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
+  id="asset-amount"
+  value={assetAmount}
+  onChange={(e) => setAssetAmount(sanitizeMoneyInput(e.target.value))}
+  onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
+  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
+    focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+  placeholder="0"
+  inputMode="decimal"
+/>
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Cash, savings, investments—anything counts.
@@ -1420,21 +1456,22 @@ export default function DashboardPage() {
                         {symbol}
                       </span>
                       <input
-                        id="goal-target"
-                        value={goalTarget}
-                        onChange={(e) => {
-                          setGoalTarget(e.target.value);
-                          if (goalTargetErr) setGoalTargetErr(null);
-                        }}
-                        className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition placeholder:text-slate-400
-                          ${
-                            goalTargetErr
-                              ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
-                              : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                          }`}
-                        placeholder="Target amount"
-                        inputMode="decimal"
-                      />
+  id="goal-target"
+  value={goalTarget}
+  onChange={(e) => {
+    setGoalTarget(sanitizeMoneyInput(e.target.value));
+    if (goalTargetErr) setGoalTargetErr(null);
+  }}
+  onBlur={() => setGoalTarget(formatMoneyInput(goalTarget))}
+  className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
+    ${
+      goalTargetErr
+        ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
+        : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+    }`}
+  placeholder="Target amount"
+  inputMode="decimal"
+/>
                     </div>
                     <p className="mt-1 text-[11px] text-slate-400">
                       Set the finish line. You can edit later.
