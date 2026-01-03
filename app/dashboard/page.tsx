@@ -496,6 +496,22 @@ export default function DashboardPage() {
     return data.user;
   }
 
+  async function authedFetch(input: RequestInfo, init?: RequestInit) {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+
+  if (!token) throw new Error("Missing session token");
+
+  return fetch(input, {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+}
+
   async function load() {
     setLoading(true);
     setError(null);
@@ -506,49 +522,18 @@ export default function DashboardPage() {
 
       setEmail(user.email || "");
 
-      const mr = await supabase
-        .from("months")
-        .select("id,user_id,month,currency,budget,assets,liabilities")
-        .eq("user_id", user.id)
-        .eq("month", monthSafe())
-        .maybeSingle();
+      const res = await authedFetch(`/api/months`, {
+  method: "PUT",
+  body: JSON.stringify({
+    month: monthSafe(),
+    currency: currencyInput.toUpperCase(),
+    budget: n(budgetInput),
+  }),
+});
 
-      if (mr.error) throw mr.error;
-
-      if (!mr.data) {
-        const ins = await supabase
-          .from("months")
-          .insert({
-            user_id: user.id,
-            month: monthSafe(),
-            currency: "GHS",
-            budget: 0,
-            assets: 0,
-            liabilities: 0,
-          })
-          .select("id,user_id,month,currency,budget,assets,liabilities")
-          .single();
-
-        if (ins.error) throw ins.error;
-        setMonthRow(ins.data as MonthRow);
-        setCurrencyInput(String(ins.data.currency || "GHS").toUpperCase());
-        setBudgetInput(String(ins.data.budget ?? 0));
-      } else {
-        setMonthRow(mr.data as MonthRow);
-        setCurrencyInput(String(mr.data.currency || "GHS").toUpperCase());
-        setBudgetInput(String(mr.data.budget ?? 0));
-      }
-
-      const ex = await supabase
-        .from("expenses")
-        .select("id,user_id,month,amount,category,description,occurred_at")
-        .eq("user_id", user.id)
-        .eq("month", monthSafe())
-        .order("occurred_at", { ascending: false })
-        .limit(50);
-
-      if (ex.error) throw ex.error;
-      setExpenses((ex.data || []) as ExpenseRow[]);
+const json = await res.json();
+if (!res.ok) throw new Error(json?.error || "Failed to save month settings.");
+await load();
 
       const asq = await supabase
         .from("asset_events")
@@ -633,16 +618,20 @@ export default function DashboardPage() {
         return;
       }
 
-      const ins = await supabase.from("expenses").insert({
-        user_id: user.id,
-        month: monthSafe(),
-        amount: amt,
-        category: expCategory,
-        description: expDesc.trim() || null,
-        occurred_at: new Date().toISOString(),
-      });
+      const res = await fetch("/api/expenses", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    month: monthSafe(),
+    amount: amt,
+    category: expCategory,
+    description: expDesc.trim() || null,
+    occurred_at: new Date().toISOString(),
+  }),
+});
 
-      if (ins.error) throw ins.error;
+const data = await res.json().catch(() => ({}));
+if (!res.ok) throw new Error(data?.error || "Failed to add expense.");
 
       setExpAmount("");
       setExpDesc("");
@@ -683,17 +672,19 @@ export default function DashboardPage() {
         return;
       }
 
-      const up = await supabase
-        .from("expenses")
-        .update({
-          amount: amt,
-          category: editExpCategory,
-          description: editExpDesc.trim() || null,
-        })
-        .eq("id", expenseId)
-        .eq("user_id", user.id);
+      const res = await fetch("/api/expenses", {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    id: expenseId,
+    amount: amt,
+    category: editExpCategory,
+    description: editExpDesc.trim() || null,
+  }),
+});
 
-      if (up.error) throw up.error;
+const data = await res.json().catch(() => ({}));
+if (!res.ok) throw new Error(data?.error || "Failed to update expense.");
 
       cancelEditExpense();
       await load();
@@ -713,13 +704,12 @@ export default function DashboardPage() {
       const user = await requireUser();
       if (!user) return;
 
-      const del = await supabase
-        .from("expenses")
-        .delete()
-        .eq("id", expenseId)
-        .eq("user_id", user.id);
+      const res = await fetch(`/api/expenses?id=${expenseId}`, {
+  method: "DELETE",
+});
 
-      if (del.error) throw del.error;
+const data = await res.json().catch(() => ({}));
+if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
       await load();
     } catch (e: any) {
       setError(e?.message || "Failed to delete expense.");
