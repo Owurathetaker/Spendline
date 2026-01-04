@@ -7,23 +7,19 @@ function getEnv() {
   if (!url || !anon) throw new Error("Missing Supabase env vars");
   return { url, anon };
 }
-
 function getBearer(req: Request) {
   const h = req.headers.get("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m?.[1] || null;
 }
-
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
-
 async function authedSupabase(req: Request) {
   const token = getBearer(req);
   if (!token) return { sb: null as any, user: null, error: "Unauthorized" };
 
   const { url, anon } = getEnv();
-
   const sb = createClient(url, anon, {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false },
@@ -31,7 +27,6 @@ async function authedSupabase(req: Request) {
 
   const { data, error } = await sb.auth.getUser(token);
   if (error || !data?.user) return { sb, user: null, error: "Unauthorized" };
-
   return { sb, user: data.user, error: null };
 }
 
@@ -45,11 +40,11 @@ export async function GET(req: Request) {
     if (!month) return jsonError("Missing month");
 
     const { data, error: qErr } = await sb
-      .from("expenses")
-      .select("id,user_id,month,amount,category,description,occurred_at")
+      .from("asset_events")
+      .select("id,user_id,month,amount,note,created_at")
       .eq("user_id", user.id)
       .eq("month", month)
-      .order("occurred_at", { ascending: false })
+      .order("created_at", { ascending: false })
       .limit(200);
 
     if (qErr) return jsonError(qErr.message, 500);
@@ -69,62 +64,19 @@ export async function POST(req: Request) {
 
     const month = String(body.month || "").trim();
     const amount = Number(body.amount);
-    const category = body.category != null ? String(body.category) : null;
-    const description = body.description != null ? String(body.description) : null;
-    const occurred_at = body.occurred_at ? String(body.occurred_at) : new Date().toISOString();
+    const note = body.note != null ? String(body.note) : null;
+    const created_at = body.created_at ? String(body.created_at) : new Date().toISOString();
 
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return jsonError("Invalid month");
     if (!Number.isFinite(amount) || amount <= 0) return jsonError("Invalid amount");
 
     const { data, error: insErr } = await sb
-      .from("expenses")
-      .insert({
-        user_id: user.id,
-        month,
-        amount,
-        category,
-        description,
-        occurred_at,
-      })
-      .select("id,user_id,month,amount,category,description,occurred_at")
+      .from("asset_events")
+      .insert({ user_id: user.id, month, amount, note, created_at })
+      .select("id,user_id,month,amount,note,created_at")
       .single();
 
     if (insErr) return jsonError(insErr.message, 500);
-    return NextResponse.json(data);
-  } catch (e: any) {
-    return jsonError(e?.message || "Server error", 500);
-  }
-}
-
-export async function PATCH(req: Request) {
-  try {
-    const { sb, user, error } = await authedSupabase(req);
-    if (error || !user) return jsonError("Unauthorized", 401);
-
-    const body = await req.json().catch(() => null);
-    if (!body) return jsonError("Invalid JSON body");
-
-    const id = Number(body.id);
-    const amount = Number(body.amount);
-    const category = body.category != null ? String(body.category) : null;
-    const description = body.description != null ? String(body.description) : null;
-
-    if (!Number.isFinite(id) || id <= 0) return jsonError("Invalid id");
-    if (!Number.isFinite(amount) || amount <= 0) return jsonError("Invalid amount");
-
-    const { data, error: upErr } = await sb
-      .from("expenses")
-      .update({
-        amount,
-        category,
-        description,
-      })
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .select("id,user_id,month,amount,category,description,occurred_at")
-      .single();
-
-    if (upErr) return jsonError(upErr.message, 500);
     return NextResponse.json(data);
   } catch (e: any) {
     return jsonError(e?.message || "Server error", 500);
@@ -141,7 +93,7 @@ export async function DELETE(req: Request) {
     if (!Number.isFinite(id) || id <= 0) return jsonError("Invalid id");
 
     const { error: delErr } = await sb
-      .from("expenses")
+      .from("asset_events")
       .delete()
       .eq("id", id)
       .eq("user_id", user.id);

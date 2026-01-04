@@ -108,12 +108,12 @@ function monthCompare(a: string, b: string) {
   const vb = pb.y * 100 + pb.m;
   return va === vb ? 0 : va < vb ? -1 : 1;
 }
+
 function sanitizeMoneyInput(v: string) {
-  // keep digits + at most one dot
   const cleaned = v.replace(/[^0-9.]/g, "");
   const parts = cleaned.split(".");
   const head = parts[0] ?? "";
-  const tail = parts.slice(1).join(""); // merge extra dots
+  const tail = parts.slice(1).join("");
   return tail.length ? `${head}.${tail}` : head;
 }
 
@@ -122,7 +122,7 @@ function formatMoneyInput(v: string) {
   if (!raw) return "";
   const parts = raw.split(".");
   const intPart = parts[0] || "0";
-  const decPart = parts[1]; // keep user decimals as typed
+  const decPart = parts[1];
   const intFmt = Number(intPart).toLocaleString();
   return decPart != null && decPart !== "" ? `${intFmt}.${decPart}` : intFmt;
 }
@@ -133,10 +133,8 @@ function toNumberFromMoneyInput(v: string) {
 }
 
 function isValidYM(ym: string) {
-  // YYYY-MM
   return /^\d{4}-(0[1-9]|1[0-2])$/.test(ym);
 }
-
 
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -152,7 +150,6 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [nudge, setNudge] = useState<string | null>(null);
 
-  // UI polish (Step 3): nudge should be accessible + non-blocking
   function pushNudge(msg: string) {
     setNudge(msg);
     window.setTimeout(() => setNudge(null), 2500);
@@ -175,7 +172,6 @@ export default function DashboardPage() {
   const [goalTarget, setGoalTarget] = useState("");
   const [goalAddId, setGoalAddId] = useState<number | null>(null);
   const [goalAddAmount, setGoalAddAmount] = useState("");
-  // Create goal inline errors
   const [goalNameErr, setGoalNameErr] = useState<string | null>(null);
   const [goalTargetErr, setGoalTargetErr] = useState<string | null>(null);
 
@@ -190,7 +186,7 @@ export default function DashboardPage() {
   const [editGoalTitle, setEditGoalTitle] = useState("");
   const [editGoalTarget, setEditGoalTarget] = useState("");
 
-  // ✅ Guard rails: 5 saving states
+  // Guard rails
   const [savingMonthSettings, setSavingMonthSettings] = useState(false);
   const [savingExpenseId, setSavingExpenseId] = useState<number | "new" | null>(
     null
@@ -200,6 +196,9 @@ export default function DashboardPage() {
   );
   const [savingGoalCreate, setSavingGoalCreate] = useState(false);
   const [savingGoalId, setSavingGoalId] = useState<number | null>(null);
+
+  const budget = n(monthRow?.budget);
+  const liabilities = n(monthRow?.liabilities);
 
   const spentTotal = useMemo(
     () => expenses.reduce((s, e) => s + n(e.amount), 0),
@@ -211,14 +210,11 @@ export default function DashboardPage() {
     [assets]
   );
 
-  const budget = n(monthRow?.budget);
-  const liabilities = n(monthRow?.liabilities);
   const remaining = budget - spentTotal;
   const netWorth = assetsTotal - liabilities;
 
   const currency = (monthRow?.currency || currencyInput || "GHS").toUpperCase();
   const symbol = currencySymbol(currency);
-
   const fmtMoney = (amount: number) => `${symbol}${n(amount).toLocaleString()}`;
 
   const progressPct = useMemo(() => {
@@ -227,11 +223,325 @@ export default function DashboardPage() {
   }, [spentTotal, budget]);
 
   function monthSafe() {
-  const m = typeof month === "string" ? month.trim() : "";
-  return isValidYM(m) ? m : ymNow();
+    const m = typeof month === "string" ? month.trim() : "";
+    return isValidYM(m) ? m : ymNow();
+  }
+
+  async function requireUser() {
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) {
+      window.location.href = "/login";
+      return null;
+    }
+    return data.user;
+  }
+
+  async function authedFetch(input: RequestInfo, init?: RequestInit) {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+
+  if (!token) throw new Error("Missing session token");
+
+  return fetch(input, {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
 }
 
-  // Goal helpers (safe)
+  async function apiFetch<T = any>(
+    path: string,
+    init?: RequestInit
+  ): Promise<T> {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+
+    if (!token) {
+      // No session means the user is not authenticated (or cookies aren’t set)
+      throw new Error("Unauthorized. Please log in again.");
+    }
+
+    const res = await fetch(path, {
+      ...init,
+      headers: {
+        ...(init?.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    // Safe body parse (prevents “Unexpected JSON input”)
+    const text = await res.text().catch(() => "");
+    const json = text ? safeJson(text) : null;
+
+    if (!res.ok) {
+      const msg =
+        (json && (json.error || json.message)) ||
+        text?.slice(0, 160) ||
+        `Request failed (${res.status})`;
+      throw new Error(String(msg));
+    }
+
+    return (json as T) ?? ({} as T);
+  }
+
+  function safeJson(text: string) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  // ===== Load everything via API routes (single source of truth) =====
+  async function load() {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      setEmail(user.email || "");
+
+      const m = monthSafe();
+
+      const mr = await apiFetch<MonthRow>(`/api/months?month=${encodeURIComponent(m)}`, {
+        method: "GET",
+      });
+      setMonthRow(mr || null);
+      setCurrencyInput(String(mr?.currency || "GHS").toUpperCase());
+      setBudgetInput(formatMoneyInput(String(mr?.budget ?? 0)));
+
+      const ex = await apiFetch<ExpenseRow[]>(
+        `/api/expenses?month=${encodeURIComponent(m)}`,
+        { method: "GET" }
+      );
+      setExpenses(Array.isArray(ex) ? ex : []);
+
+      const asq = await apiFetch<AssetRow[]>(
+        `/api/assets?month=${encodeURIComponent(m)}`,
+        { method: "GET" }
+      );
+      setAssets(Array.isArray(asq) ? asq : []);
+
+      const gq = await apiFetch<SavingGoalRow[]>(
+        `/api/goals?month=${encodeURIComponent(m)}`,
+        { method: "GET" }
+      );
+      setGoals(Array.isArray(gq) ? gq : []);
+    } catch (e: any) {
+      setError(e?.message || "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  async function saveMonthSettings() {
+    if (savingMonthSettings) return;
+    setError(null);
+    setSavingMonthSettings(true);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const m = monthSafe();
+      await apiFetch(`/api/months`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          month: m,
+          currency: currencyInput.toUpperCase(),
+          budget: toNumberFromMoneyInput(budgetInput),
+        }),
+      });
+
+      await load();
+      pushNudge("Month settings saved.");
+    } catch (e: any) {
+      setError(e?.message || "Failed to save month settings.");
+    } finally {
+      setSavingMonthSettings(false);
+    }
+  }
+
+  async function addExpense() {
+    if (savingExpenseId === "new") return;
+    setError(null);
+    setSavingExpenseId("new");
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const amt = toNumberFromMoneyInput(expAmount);
+      if (amt <= 0) {
+        pushNudge("Enter an expense amount greater than 0.");
+        return;
+      }
+
+      await apiFetch(`/api/expenses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          month: monthSafe(),
+          amount: amt,
+          category: expCategory,
+          description: expDesc.trim() || null,
+          occurred_at: new Date().toISOString(),
+        }),
+      });
+
+      setExpAmount("");
+      setExpDesc("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add expense.");
+    } finally {
+      setSavingExpenseId(null);
+    }
+  }
+
+  function startEditExpense(e: ExpenseRow) {
+    setEditingExpenseId(e.id);
+    setEditExpAmount(formatMoneyInput(String(n(e.amount))));
+    setEditExpCategory(((e.category || "Other") as any) || "Other");
+    setEditExpDesc(e.description || "");
+  }
+
+  function cancelEditExpense() {
+    setEditingExpenseId(null);
+    setEditExpAmount("");
+    setEditExpDesc("");
+    setEditExpCategory("Other");
+  }
+
+  async function saveEditExpense(expenseId: number) {
+    if (savingExpenseId === expenseId) return;
+    setError(null);
+    setSavingExpenseId(expenseId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const amt = toNumberFromMoneyInput(editExpAmount);
+      if (amt <= 0) {
+        pushNudge("Amount must be greater than 0.");
+        return;
+      }
+
+      await apiFetch(`/api/expenses`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: expenseId,
+          amount: amt,
+          category: editExpCategory,
+          description: editExpDesc.trim() || null,
+        }),
+      });
+
+      cancelEditExpense();
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to update expense.");
+    } finally {
+      setSavingExpenseId(null);
+    }
+  }
+
+  async function deleteExpense(expenseId: number) {
+    if (savingExpenseId === expenseId) return;
+    setError(null);
+    setSavingExpenseId(expenseId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      await apiFetch(`/api/expenses?id=${encodeURIComponent(String(expenseId))}`, {
+        method: "DELETE",
+      });
+
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to delete expense.");
+    } finally {
+      setSavingExpenseId(null);
+    }
+  }
+
+  async function addAsset() {
+    if (savingAssetId === "new") return;
+    setError(null);
+    setSavingAssetId("new");
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const amt = toNumberFromMoneyInput(assetAmount);
+      if (amt <= 0) {
+        pushNudge("Enter an asset amount greater than 0.");
+        return;
+      }
+
+      await apiFetch(`/api/assets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          month: monthSafe(),
+          amount: amt,
+          note: assetNote.trim() || null,
+          created_at: new Date().toISOString(),
+        }),
+      });
+
+      setAssetAmount("");
+      setAssetNote("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add asset.");
+    } finally {
+      setSavingAssetId(null);
+    }
+  }
+
+  async function deleteAsset(assetId: number) {
+  if (savingAssetId === assetId) return;
+  setError(null);
+  setSavingAssetId(assetId);
+
+  try {
+    const user = await requireUser();
+    if (!user) return;
+
+    const { error: delError } = await supabase
+      .from("asset_events")
+      .delete()
+      .eq("id", assetId)
+      .eq("user_id", user.id);
+
+    if (delError) throw delError;
+
+    await load();
+  } catch (e: any) {
+    setError(e?.message || "Failed to delete asset.");
+  } finally {
+    setSavingAssetId(null);
+  }
+}
+
+  // Goal helpers
   function goalProgress(g: SavingGoalRow) {
     const target = Math.max(0, n(g.target_amount));
     const saved = Math.max(0, n(g.saved_amount));
@@ -241,7 +551,6 @@ export default function DashboardPage() {
     return { target, saved, pct, remaining: remainingAmt, complete };
   }
 
-  // Option A sorting: incomplete first, then highest progress, then newest
   const sortedGoals = useMemo(() => {
     const copy = [...goals];
 
@@ -260,7 +569,6 @@ export default function DashboardPage() {
     return copy;
   }, [goals]);
 
-  // ===== Next Move (top goal action engine) =====
   const nextMove = useMemo(() => {
     if (!sortedGoals || sortedGoals.length === 0) return null;
 
@@ -323,10 +631,9 @@ export default function DashboardPage() {
     }, 50);
   }
 
-  // Quick/Smart add: preset only (no auto-add)
   function presetGoalAmount(goalId: number, amount: number) {
     setGoalAddId(goalId);
-    setGoalAddAmount(String(amount));
+    setGoalAddAmount(formatMoneyInput(String(amount)));
 
     setTimeout(() => {
       const el = document.getElementById(
@@ -337,7 +644,162 @@ export default function DashboardPage() {
     }, 50);
   }
 
-  // ✅ Achievements computed in-app
+  async function createGoal() {
+    setGoalNameErr(null);
+    setGoalTargetErr(null);
+    setError(null);
+
+    if (savingGoalCreate) return;
+    setSavingGoalCreate(true);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const name = goalName.trim();
+      const target = toNumberFromMoneyInput(goalTarget);
+
+      let hasErr = false;
+      if (!name) {
+        setGoalNameErr("Enter a goal name.");
+        hasErr = true;
+      }
+      if (target <= 0) {
+        setGoalTargetErr("Enter a target amount greater than 0.");
+        hasErr = true;
+      }
+      if (hasErr) return;
+
+      await apiFetch(`/api/goals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          month: monthSafe(),
+          title: name,
+          target_amount: target,
+        }),
+      });
+
+      setGoalName("");
+      setGoalTarget("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to create goal.");
+    } finally {
+      setSavingGoalCreate(false);
+    }
+  }
+
+  function startEditGoal(g: SavingGoalRow) {
+    setEditingGoalId(g.id);
+    setEditGoalTitle(g.title || "");
+    setEditGoalTarget(formatMoneyInput(String(n(g.target_amount))));
+  }
+
+  function cancelEditGoal() {
+    setEditingGoalId(null);
+    setEditGoalTitle("");
+    setEditGoalTarget("");
+  }
+
+  async function saveEditGoal(goalId: number) {
+    if (savingGoalId === goalId) return;
+    setError(null);
+    setSavingGoalId(goalId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      const title = editGoalTitle.trim();
+      const target = toNumberFromMoneyInput(editGoalTarget);
+
+      if (!title) {
+        pushNudge("Goal title cannot be empty.");
+        return;
+      }
+      if (target <= 0) {
+        pushNudge("Target must be greater than 0.");
+        return;
+      }
+
+      await apiFetch(`/api/goals`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: goalId,
+          title,
+          target_amount: target,
+        }),
+      });
+
+      cancelEditGoal();
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to update goal.");
+    } finally {
+      setSavingGoalId(null);
+    }
+  }
+
+  async function addToGoal(goalId: number) {
+    if (savingGoalId === goalId) return;
+    setError(null);
+    setSavingGoalId(goalId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      setGoalAddId(goalId);
+
+      const amt = toNumberFromMoneyInput(goalAddAmount);
+      if (amt <= 0) {
+        pushNudge("Enter an amount greater than 0.");
+        return;
+      }
+
+      await apiFetch(`/api/goals`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: goalId,
+          add_amount: amt,
+        }),
+      });
+
+      setGoalAddId(null);
+      setGoalAddAmount("");
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add progress.");
+    } finally {
+      setSavingGoalId(null);
+    }
+  }
+
+  async function deleteGoal(goalId: number) {
+    if (savingGoalId === goalId) return;
+    setError(null);
+    setSavingGoalId(goalId);
+
+    try {
+      const user = await requireUser();
+      if (!user) return;
+
+      await apiFetch(`/api/goals?id=${encodeURIComponent(String(goalId))}`, {
+        method: "DELETE",
+      });
+
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to delete goal.");
+    } finally {
+      setSavingGoalId(null);
+    }
+  }
+
+  // Achievements
   const achievements = useMemo(() => {
     const expCount = expenses.length;
     const assetCount = assets.length;
@@ -400,7 +862,7 @@ export default function DashboardPage() {
     ];
   }, [expenses, assets, goals]);
 
-  // --- Mini analytics ---
+  // Mini analytics
   const analytics = useMemo(() => {
     const ym = monthSafe();
     const nowYm = ymNow();
@@ -440,7 +902,6 @@ export default function DashboardPage() {
     return { topCategory, avgDailySpend, daysLeft, projectedSpend, dim };
   }, [expenses, spentTotal, month]);
 
-  // --- Next moves (jump/focus) ---
   function focusById(id: string) {
     const el = document.getElementById(id) as
       | HTMLInputElement
@@ -450,7 +911,6 @@ export default function DashboardPage() {
     setTimeout(() => el?.focus(), 250);
   }
 
-  // NOTE: you asked to NOT show "create goal" here
   const nextMoves = useMemo(() => {
     const moves: { title: string; detail: string; action: () => void }[] = [];
 
@@ -486,477 +946,6 @@ export default function DashboardPage() {
 
     return moves.slice(0, 3);
   }, [budget, expenses.length, assets.length]);
-
-  async function requireUser() {
-    const { data, error } = await supabase.auth.getUser();
-    if (error || !data?.user) {
-      window.location.href = "/login";
-      return null;
-    }
-    return data.user;
-  }
-
-  async function authedFetch(input: RequestInfo, init?: RequestInit) {
-  const { data } = await supabase.auth.getSession();
-  const token = data?.session?.access_token;
-
-  if (!token) throw new Error("Missing session token");
-
-  return fetch(input, {
-    ...init,
-    headers: {
-      ...(init?.headers || {}),
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-  });
-}
-
-  async function load() {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      setEmail(user.email || "");
-
-      const res = await authedFetch(`/api/months`, {
-  method: "PUT",
-  body: JSON.stringify({
-    month: monthSafe(),
-    currency: currencyInput.toUpperCase(),
-    budget: n(budgetInput),
-  }),
-});
-
-const json = await res.json();
-if (!res.ok) throw new Error(json?.error || "Failed to save month settings.");
-await load();
-
-      const asq = await supabase
-        .from("asset_events")
-        .select("id,user_id,month,amount,note,created_at")
-        .eq("user_id", user.id)
-        .eq("month", monthSafe())
-        .order("created_at", { ascending: false })
-        .limit(50);
-
-      if (asq.error) throw asq.error;
-      setAssets((asq.data || []) as AssetRow[]);
-
-      const gq = await supabase
-        .from("saving_goals")
-        .select(
-          "id,user_id,month,title,target_amount,saved_amount,created_at,updated_at"
-        )
-        .eq("user_id", user.id)
-        .eq("month", monthSafe())
-        .order("created_at", { ascending: false });
-
-      if (gq.error) throw gq.error;
-      setGoals((gq.data || []) as SavingGoalRow[]);
-    } catch (e: any) {
-      const msg =
-        e?.message ||
-        e?.error_description ||
-        e?.details ||
-        "Something went wrong.";
-      setError(String(msg));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function logout() {
-    await supabase.auth.signOut();
-    window.location.href = "/login";
-  }
-
-  async function saveMonthSettings() {
-    if (savingMonthSettings) return;
-    setError(null);
-    setSavingMonthSettings(true);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const patch = {
-        currency: currencyInput.toUpperCase(),
-        budget: toNumberFromMoneyInput(budgetInput),
-      };
-
-      const up = await supabase
-        .from("months")
-        .update(patch)
-        .eq("user_id", user.id)
-        .eq("month", monthSafe());
-
-      if (up.error) throw up.error;
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to save month settings.");
-    } finally {
-      setSavingMonthSettings(false);
-    }
-  }
-
-  async function addExpense() {
-    if (savingExpenseId === "new") return;
-    setError(null);
-    setSavingExpenseId("new");
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const amt = toNumberFromMoneyInput(expAmount);
-      if (amt <= 0) {
-        pushNudge("Enter an expense amount greater than 0.");
-        return;
-      }
-
-      const res = await fetch("/api/expenses", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    month: monthSafe(),
-    amount: amt,
-    category: expCategory,
-    description: expDesc.trim() || null,
-    occurred_at: new Date().toISOString(),
-  }),
-});
-
-const data = await res.json().catch(() => ({}));
-if (!res.ok) throw new Error(data?.error || "Failed to add expense.");
-
-      setExpAmount("");
-      setExpDesc("");
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to add expense.");
-    } finally {
-      setSavingExpenseId(null);
-    }
-  }
-
-  function startEditExpense(e: ExpenseRow) {
-    setEditingExpenseId(e.id);
-    setEditExpAmount(String(n(e.amount)));
-    setEditExpCategory(((e.category || "Other") as any) || "Other");
-    setEditExpDesc(e.description || "");
-  }
-
-  function cancelEditExpense() {
-    setEditingExpenseId(null);
-    setEditExpAmount("");
-    setEditExpDesc("");
-    setEditExpCategory("Other");
-  }
-
-  async function saveEditExpense(expenseId: number) {
-    if (savingExpenseId === expenseId) return;
-    setError(null);
-    setSavingExpenseId(expenseId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const amt = n(editExpAmount);
-      if (amt <= 0) {
-        pushNudge("Amount must be greater than 0.");
-        return;
-      }
-
-      const res = await fetch("/api/expenses", {
-  method: "PATCH",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    id: expenseId,
-    amount: amt,
-    category: editExpCategory,
-    description: editExpDesc.trim() || null,
-  }),
-});
-
-const data = await res.json().catch(() => ({}));
-if (!res.ok) throw new Error(data?.error || "Failed to update expense.");
-
-      cancelEditExpense();
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to update expense.");
-    } finally {
-      setSavingExpenseId(null);
-    }
-  }
-
-  async function deleteExpense(expenseId: number) {
-    if (savingExpenseId === expenseId) return;
-    setError(null);
-    setSavingExpenseId(expenseId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const res = await fetch(`/api/expenses?id=${expenseId}`, {
-  method: "DELETE",
-});
-
-const data = await res.json().catch(() => ({}));
-if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to delete expense.");
-    } finally {
-      setSavingExpenseId(null);
-    }
-  }
-
-  async function addAsset() {
-    if (savingAssetId === "new") return;
-    setError(null);
-    setSavingAssetId("new");
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const amt = toNumberFromMoneyInput(assetAmount);
-      if (amt <= 0) {
-        pushNudge("Enter an asset amount greater than 0.");
-        return;
-      }
-
-      const ins = await supabase.from("asset_events").insert({
-        user_id: user.id,
-        month: monthSafe(),
-        amount: amt,
-        note: assetNote.trim() || null,
-        created_at: new Date().toISOString(),
-      });
-
-      if (ins.error) throw ins.error;
-
-      setAssetAmount("");
-      setAssetNote("");
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to add asset.");
-    } finally {
-      setSavingAssetId(null);
-    }
-  }
-
-  async function deleteAsset(assetId: number) {
-    if (savingAssetId === assetId) return;
-    setError(null);
-    setSavingAssetId(assetId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const del = await supabase
-        .from("asset_events")
-        .delete()
-        .eq("id", assetId)
-        .eq("user_id", user.id);
-
-      if (del.error) throw del.error;
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to delete asset.");
-    } finally {
-      setSavingAssetId(null);
-    }
-  }
-
-  async function createGoal() {
-    // local (inline) errors only — no global banner for validation
-    setGoalNameErr(null);
-    setGoalTargetErr(null);
-    setError(null);
-
-    // UI polish (Step 6): guard rails for "busy" state on create
-    if (savingGoalCreate) return;
-    setSavingGoalCreate(true);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const name = goalName.trim();
-      const target = toNumberFromMoneyInput(goalTarget);
-
-      let hasErr = false;
-
-      if (!name) {
-        setGoalNameErr("Enter a goal name.");
-        hasErr = true;
-      }
-
-      if (target <= 0) {
-        setGoalTargetErr("Enter a target amount greater than 0.");
-        hasErr = true;
-      }
-
-      if (hasErr) return;
-
-      const ins = await supabase.from("saving_goals").insert({
-        user_id: user.id,
-        month: monthSafe(),
-        title: name,
-        target_amount: target,
-        saved_amount: 0,
-        updated_at: new Date().toISOString(),
-      });
-
-      if (ins.error) throw ins.error;
-
-      setGoalName("");
-      setGoalTarget("");
-      await load();
-    } catch (e: any) {
-      // only real server/db errors go to the global banner
-      setError(e?.message || "Failed to create goal.");
-    } finally {
-      setSavingGoalCreate(false);
-    }
-  }
-
-  function startEditGoal(g: SavingGoalRow) {
-    setEditingGoalId(g.id);
-    setEditGoalTitle(g.title || "");
-    setEditGoalTarget(String(n(g.target_amount)));
-  }
-
-  function cancelEditGoal() {
-    setEditingGoalId(null);
-    setEditGoalTitle("");
-    setEditGoalTarget("");
-  }
-
-  async function saveEditGoal(goalId: number) {
-    if (savingGoalId === goalId) return;
-    setError(null);
-    setSavingGoalId(goalId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const title = editGoalTitle.trim();
-      const target = n(editGoalTarget);
-
-      if (!title) {
-        pushNudge("Goal title cannot be empty.");
-        return;
-      }
-      if (target <= 0) {
-        pushNudge("Target must be greater than 0.");
-        return;
-      }
-
-      const up = await supabase
-        .from("saving_goals")
-        .update({
-          title,
-          target_amount: target,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", goalId)
-        .eq("user_id", user.id);
-
-      if (up.error) throw up.error;
-
-      cancelEditGoal();
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to update goal.");
-    } finally {
-      setSavingGoalId(null);
-    }
-  }
-
-  async function addToGoal(goalId: number, amountOverride?: number) {
-    if (savingGoalId === goalId) return;
-    setError(null);
-    setSavingGoalId(goalId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      setGoalAddId(goalId);
-
-      const amt = amountOverride != null ? n(amountOverride) : n(goalAddAmount);
-
-      if (amt <= 0) {
-        pushNudge("Enter an amount greater than 0.");
-        return;
-      }
-
-      const g = goals.find((x) => x.id === goalId);
-      if (!g) throw new Error("Goal not found.");
-
-      const p = goalProgress(g);
-      if (p.complete) return;
-
-      const capped = p.target > 0 ? Math.min(amt, p.remaining) : amt;
-      if (capped <= 0) return;
-
-      const newSaved = n(g.saved_amount) + capped;
-
-      const up = await supabase
-        .from("saving_goals")
-        .update({
-          saved_amount: newSaved,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", goalId)
-        .eq("user_id", user.id);
-
-      if (up.error) throw up.error;
-
-      setGoalAddId(null);
-      setGoalAddAmount("");
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to add progress.");
-    } finally {
-      setSavingGoalId(null);
-    }
-  }
-
-  async function deleteGoal(goalId: number) {
-    if (savingGoalId === goalId) return;
-    setError(null);
-    setSavingGoalId(goalId);
-
-    try {
-      const user = await requireUser();
-      if (!user) return;
-
-      const del = await supabase
-        .from("saving_goals")
-        .delete()
-        .eq("id", goalId)
-        .eq("user_id", user.id);
-
-      if (del.error) throw del.error;
-      await load();
-    } catch (e: any) {
-      setError(e?.message || "Failed to delete goal.");
-    } finally {
-      setSavingGoalId(null);
-    }
-  }
 
   useEffect(() => {
     load();
@@ -1004,7 +993,6 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
           />
         </div>
 
-        {/* UI polish (Step 5): skeleton loader instead of plain text */}
         {loading && (
           <div className="mt-6 space-y-4">
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -1061,7 +1049,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                   <button
                     type="button"
                     onClick={() => setError(null)}
-                    className="rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 transition active:scale-[0.98] hover:bg-red-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-red-200"
+                    className="rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 transition active:scale-[0.98] hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-200"
                   >
                     Dismiss
                   </button>
@@ -1069,7 +1057,6 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
               </div>
             )}
 
-            {/* UI polish (Step 3): accessible toast */}
             {nudge && (
               <div
                 className="fixed bottom-4 right-4 z-50 w-[92vw] max-w-sm"
@@ -1089,7 +1076,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                     <button
                       type="button"
                       onClick={() => setNudge(null)}
-                      className="rounded-lg border border-amber-200 bg-white px-2 py-1 text-[11px] font-semibold text-amber-900 transition active:scale-[0.98] hover:bg-amber-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                      className="rounded-lg border border-amber-200 bg-white px-2 py-1 text-[11px] font-semibold text-amber-900 transition active:scale-[0.98] hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-200"
                     >
                       OK
                     </button>
@@ -1114,11 +1101,21 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                   <p className="text-sm text-slate-600">{progressPct}%</p>
                 </div>
 
-                <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                  <div
-                    className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
-                    style={{ width: `${progressPct}%` }}
-                  />
+                <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                  <div className="h-3 w-full rounded-full bg-slate-100">
+                    <div
+                      className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+
+                  {/* NEW: donut/pie chart */}
+                  <div className="justify-self-end">
+                    <BudgetDonut
+                      pct={progressPct}
+                      label={`${fmtMoney(spentTotal)} / ${fmtMoney(budget)}`}
+                    />
+                  </div>
                 </div>
 
                 {/* Mini analytics */}
@@ -1157,20 +1154,19 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                   <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => focusById("exp-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
                     >
                       + Log expense
                     </button>
                     <button
                       onClick={() => focusById("asset-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
                     >
                       + Add asset
                     </button>
                   </div>
                 </div>
 
-                {/* Next move cards */}
                 {nextMoves.length > 0 && (
                   <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
                     <p className="text-xs font-bold text-slate-700">Next move</p>
@@ -1179,7 +1175,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                         <button
                           key={i}
                           onClick={m.action}
-                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 transition active:scale-[0.99] hover:bg-slate-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 transition active:scale-[0.99] hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
                         >
                           <div className="text-sm font-semibold">{m.title}</div>
                           <div className="mt-1 text-xs text-slate-500">
@@ -1191,7 +1187,6 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                   </div>
                 )}
 
-                {/* Top goal next move */}
                 {nextMove && (
                   <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs font-bold text-slate-700">
@@ -1201,7 +1196,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                     {!goalProgress(nextMove.goal).complete && (
                       <button
                         onClick={() => jumpToGoalInput(nextMove.goal.id)}
-                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
                       >
                         Add to this goal
                       </button>
@@ -1215,13 +1210,13 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <SectionTitle
-                  title="Achievements"
-                  subtitle="Small wins = momentum."
-                />
+                <SectionTitle title="Achievements" subtitle="Small wins = momentum." />
                 <ul className="mt-3 space-y-2 text-sm text-slate-700">
                   {achievements.map((a, i) => (
-                    <li key={i} className="flex items-start justify-between gap-3">
+                    <li
+                      key={i}
+                      className="flex items-start justify-between gap-3"
+                    >
                       <div className="min-w-0">
                         <div className="font-semibold">{a.title}</div>
                         <div className="text-xs text-slate-500 truncate">
@@ -1254,22 +1249,20 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                 />
 
                 <label className="mt-3 block text-xs text-slate-500">Budget</label>
-
                 <div className="mt-1">
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
                       {symbol}
                     </span>
                     <input
-  id="budget-input"
-  value={budgetInput}
-  onChange={(e) => setBudgetInput(sanitizeMoneyInput(e.target.value))}
-  onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
-  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
-    focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-  placeholder="0"
-  inputMode="decimal"
-/>
+                      id="budget-input"
+                      value={budgetInput}
+                      onChange={(e) => setBudgetInput(sanitizeMoneyInput(e.target.value))}
+                      onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Monthly cap (rough is fine).
@@ -1287,28 +1280,23 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
 
               {/* Add expense */}
               <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle
-                  title="Log expense"
-                  subtitle="Track money that left today."
-                />
+                <SectionTitle title="Log expense" subtitle="Track money that left today." />
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
-
                 <div className="mt-1">
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
                       {symbol}
                     </span>
                     <input
-  id="exp-amount"
-  value={expAmount}
-  onChange={(e) => setExpAmount(sanitizeMoneyInput(e.target.value))}
-  onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
-  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
-    focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
-  placeholder="0"
-  inputMode="decimal"
-/>
+                      id="exp-amount"
+                      value={expAmount}
+                      onChange={(e) => setExpAmount(sanitizeMoneyInput(e.target.value))}
+                      onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Numbers only (e.g. 1500).
@@ -1351,28 +1339,23 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
 
               {/* Add asset */}
               <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle
-                  title="Stack asset"
-                  subtitle="Record money that stayed."
-                />
+                <SectionTitle title="Stack asset" subtitle="Record money that stayed." />
 
                 <label className="mt-3 block text-xs text-slate-500">Amount</label>
-
                 <div className="mt-1">
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
                       {symbol}
                     </span>
                     <input
-  id="asset-amount"
-  value={assetAmount}
-  onChange={(e) => setAssetAmount(sanitizeMoneyInput(e.target.value))}
-  onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
-  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
-    focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-  placeholder="0"
-  inputMode="decimal"
-/>
+                      id="asset-amount"
+                      value={assetAmount}
+                      onChange={(e) => setAssetAmount(sanitizeMoneyInput(e.target.value))}
+                      onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                      placeholder="0"
+                      inputMode="decimal"
+                    />
                   </div>
                   <p className="mt-1 text-[11px] text-slate-400">
                     Cash, savings, investments—anything counts.
@@ -1421,12 +1404,11 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                     }}
                     aria-invalid={!!goalNameErr}
                     aria-describedby={goalNameErr ? "goal-name-err" : undefined}
-                    className={`w-full rounded-xl border bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2
-                      ${
-                        goalNameErr
-                          ? "border-red-300 focus:ring-red-200"
-                          : "border-slate-200 focus:ring-slate-200"
-                      }`}
+                    className={`w-full rounded-xl border bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 ${
+                      goalNameErr
+                        ? "border-red-300 focus:ring-red-200"
+                        : "border-slate-200 focus:ring-slate-200"
+                    }`}
                     placeholder="Goal name (e.g. Emergency Fund)"
                   />
 
@@ -1446,22 +1428,21 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                         {symbol}
                       </span>
                       <input
-  id="goal-target"
-  value={goalTarget}
-  onChange={(e) => {
-    setGoalTarget(sanitizeMoneyInput(e.target.value));
-    if (goalTargetErr) setGoalTargetErr(null);
-  }}
-  onBlur={() => setGoalTarget(formatMoneyInput(goalTarget))}
-  className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition
-    ${
-      goalTargetErr
-        ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
-        : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-    }`}
-  placeholder="Target amount"
-  inputMode="decimal"
-/>
+                        id="goal-target"
+                        value={goalTarget}
+                        onChange={(e) => {
+                          setGoalTarget(sanitizeMoneyInput(e.target.value));
+                          if (goalTargetErr) setGoalTargetErr(null);
+                        }}
+                        onBlur={() => setGoalTarget(formatMoneyInput(goalTarget))}
+                        className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition ${
+                          goalTargetErr
+                            ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
+                            : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                        }`}
+                        placeholder="Target amount"
+                        inputMode="decimal"
+                      />
                     </div>
                     <p className="mt-1 text-[11px] text-slate-400">
                       Set the finish line. You can edit later.
@@ -1514,9 +1495,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                   {isEditing ? (
                                     <input
                                       value={editGoalTitle}
-                                      onChange={(e) =>
-                                        setEditGoalTitle(e.target.value)
-                                      }
+                                      onChange={(e) => setEditGoalTitle(e.target.value)}
                                       className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Goal title"
                                       disabled={isGoalBusy}
@@ -1546,7 +1525,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                           <button
                                             onClick={() => saveEditGoal(g.id)}
                                             disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                             title="Save"
                                           >
                                             {isGoalBusy ? "…" : "✅"}
@@ -1554,7 +1533,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                           <button
                                             onClick={cancelEditGoal}
                                             disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                             title="Cancel"
                                           >
                                             ✖️
@@ -1564,7 +1543,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                         <button
                                           onClick={() => startEditGoal(g)}
                                           disabled={isGoalBusy}
-                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                           title="Edit goal"
                                         >
                                           ✏️
@@ -1576,7 +1555,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                   <button
                                     onClick={() => deleteGoal(g.id)}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                    className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     title="Delete goal"
                                   >
                                     {isGoalBusy ? "Deleting…" : "🗑️"}
@@ -1587,14 +1566,11 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                               <div className="mt-2">
                                 {isEditing ? (
                                   <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-500">
-                                      Target
-                                    </span>
+                                    <span className="text-xs text-slate-500">Target</span>
                                     <input
                                       value={editGoalTarget}
-                                      onChange={(e) =>
-                                        setEditGoalTarget(e.target.value)
-                                      }
+                                      onChange={(e) => setEditGoalTarget(sanitizeMoneyInput(e.target.value))}
+                                      onBlur={() => setEditGoalTarget(formatMoneyInput(editGoalTarget))}
                                       className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="0"
                                       inputMode="decimal"
@@ -1627,7 +1603,6 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                             />
                           </div>
 
-                          {/* Quick/Smart add = preset only (no auto-add) */}
                           <div className="mt-3 flex flex-col gap-2">
                             {!complete && (
                               <div className="flex flex-wrap gap-2">
@@ -1637,7 +1612,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                     type="button"
                                     onClick={() => presetGoalAmount(g.id, amt)}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   >
                                     +{fmtMoney(amt)}
                                   </button>
@@ -1654,7 +1629,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                       presetGoalAmount(g.id, smartAmt);
                                     }}
                                     disabled={isGoalBusy}
-                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition active:scale-[0.98] hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition active:scale-[0.98] hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-emerald-200"
                                   >
                                     Smart add
                                   </button>
@@ -1664,20 +1639,22 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                   type="button"
                                   onClick={() => jumpToGoalInput(g.id)}
                                   disabled={isGoalBusy}
-                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                 >
                                   Focus
                                 </button>
                               </div>
                             )}
 
-                            {/* Manual add */}
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                               <input
                                 id={`goal-add-${g.id}`}
                                 value={goalAddId === g.id ? goalAddAmount : ""}
                                 onFocus={() => setGoalAddId(g.id)}
-                                onChange={(e) => setGoalAddAmount(e.target.value)}
+                                onChange={(e) => setGoalAddAmount(sanitizeMoneyInput(e.target.value))}
+                                onBlur={() => {
+                                  if (goalAddId === g.id) setGoalAddAmount(formatMoneyInput(goalAddAmount));
+                                }}
                                 className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                 placeholder={complete ? "Completed" : "Add custom amount"}
                                 inputMode="decimal"
@@ -1686,13 +1663,9 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                               <button
                                 onClick={() => addToGoal(g.id)}
                                 disabled={complete || isGoalBusy}
-                                className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-slate-900 disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                                className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
                               >
-                                {complete
-                                  ? "Completed"
-                                  : isGoalBusy
-                                  ? "Adding…"
-                                  : "Add"}
+                                {complete ? "Completed" : isGoalBusy ? "Adding…" : "Add"}
                               </button>
                             </div>
                           </div>
@@ -1727,7 +1700,10 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                     <input
                                       value={editExpAmount}
                                       onChange={(ev) =>
-                                        setEditExpAmount(ev.target.value)
+                                        setEditExpAmount(sanitizeMoneyInput(ev.target.value))
+                                      }
+                                      onBlur={() =>
+                                        setEditExpAmount(formatMoneyInput(editExpAmount))
                                       }
                                       className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Amount"
@@ -1760,14 +1736,14 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                     <button
                                       onClick={() => saveEditExpense(e.id)}
                                       disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     >
                                       {isBusy ? "Saving…" : "Save"}
                                     </button>
                                     <button
                                       onClick={cancelEditExpense}
                                       disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                     >
                                       Cancel
                                     </button>
@@ -1796,7 +1772,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                 <button
                                   onClick={() => startEditExpense(e)}
                                   disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   title="Edit"
                                 >
                                   ✏️
@@ -1804,7 +1780,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                                 <button
                                   onClick={() => deleteExpense(e.id)}
                                   disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   title="Delete"
                                 >
                                   {isBusy ? "…" : "🗑️"}
@@ -1851,7 +1827,7 @@ if (!res.ok) throw new Error(data?.error || "Failed to delete expense.");
                             <button
                               onClick={() => deleteAsset(a.id)}
                               disabled={isBusy}
-                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                               title="Delete"
                             >
                               {isBusy ? "…" : "🗑️"}
@@ -1894,7 +1870,13 @@ function Card({ title, value }: { title: string; value: string }) {
   );
 }
 
-function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+function SectionTitle({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle?: string;
+}) {
   return (
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
@@ -1911,6 +1893,69 @@ function EmptyState({ text }: { text: string }) {
   return (
     <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
       <p className="text-sm text-slate-500">{text}</p>
+    </div>
+  );
+}
+
+/**
+ * Simple donut chart: shows % spent (0-100).
+ * No dependencies. Works in iOS Safari.
+ */
+function BudgetDonut({ pct, label }: { pct: number; label: string }) {
+  const p = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
+  const size = 56;
+  const stroke = 8;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const dash = (p / 100) * c;
+
+  return (
+    <div className="flex items-center gap-3">
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="shrink-0"
+        aria-label="Budget usage donut chart"
+      >
+        {/* track */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="rgb(226 232 240)" // slate-200-ish
+          strokeWidth={stroke}
+        />
+        {/* progress */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="rgb(16 185 129)" // emerald-500-ish
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${dash} ${c - dash}`}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+        <text
+          x="50%"
+          y="50%"
+          dominantBaseline="middle"
+          textAnchor="middle"
+          fontSize="12"
+          fontWeight="800"
+          fill="rgb(15 23 42)"
+        >
+          {p}%
+        </text>
+      </svg>
+
+      <div className="hidden sm:block">
+        <p className="text-[11px] text-slate-500">Spent vs budget</p>
+        <p className="text-xs font-semibold text-slate-700">{label}</p>
+      </div>
     </div>
   );
 }
