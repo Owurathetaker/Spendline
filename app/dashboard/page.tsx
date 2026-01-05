@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { useRouter } from "next/navigation";
 
 type MonthRow = {
   id: number;
@@ -25,7 +26,7 @@ type ExpenseRow = {
 };
 
 type AssetRow = {
-  id: number;
+  id: string;
   user_id: string;
   month: string;
   amount: number;
@@ -138,6 +139,7 @@ function isValidYM(ym: string) {
 
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
+  const router = useRouter();
 
   const [loading, setLoading] = useState(true);
   const [email, setEmail] = useState("");
@@ -191,7 +193,7 @@ export default function DashboardPage() {
   const [savingExpenseId, setSavingExpenseId] = useState<number | "new" | null>(
     null
   );
-  const [savingAssetId, setSavingAssetId] = useState<number | "new" | null>(
+  const [savingAssetId, setSavingAssetId] = useState<string | "new" | null>(
     null
   );
   const [savingGoalCreate, setSavingGoalCreate] = useState(false);
@@ -230,70 +232,60 @@ export default function DashboardPage() {
   async function requireUser() {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data?.user) {
-      window.location.href = "/login";
+      router.replace("/login");
       return null;
     }
     return data.user;
   }
 
-  async function authedFetch(input: RequestInfo, init?: RequestInit) {
+  function safeParseJson(text: string) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   const { data } = await supabase.auth.getSession();
   const token = data?.session?.access_token;
 
-  if (!token) throw new Error("Missing session token");
+  if (!token) throw new Error("Unauthorized. Please log in again.");
 
-  return fetch(input, {
+  const hasBody = init?.body != null;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    ...(init?.headers as any),
+  };
+
+  // Only set JSON content-type when we actually send a JSON body
+  if (hasBody && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const res = await fetch(path, {
     ...init,
-    headers: {
-      ...(init?.headers || {}),
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers,
+    // Good practice in production; avoids weird caching surprises
+    cache: "no-store",
   });
+
+  const text = await res.text().catch(() => "");
+  const json = text ? safeParseJson(text) : null;
+
+  if (!res.ok) {
+    const msg =
+      (json && (json.error || json.message)) ||
+      (text ? text.slice(0, 160) : "") ||
+      `Request failed (${res.status})`;
+    throw new Error(String(msg));
+  }
+
+  // If endpoint returns no body, don't crash
+  return (json as T) ?? ({} as T);
 }
-
-  async function apiFetch<T = any>(
-    path: string,
-    init?: RequestInit
-  ): Promise<T> {
-    const { data } = await supabase.auth.getSession();
-    const token = data?.session?.access_token;
-
-    if (!token) {
-      // No session means the user is not authenticated (or cookies aren’t set)
-      throw new Error("Unauthorized. Please log in again.");
-    }
-
-    const res = await fetch(path, {
-      ...init,
-      headers: {
-        ...(init?.headers || {}),
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    // Safe body parse (prevents “Unexpected JSON input”)
-    const text = await res.text().catch(() => "");
-    const json = text ? safeJson(text) : null;
-
-    if (!res.ok) {
-      const msg =
-        (json && (json.error || json.message)) ||
-        text?.slice(0, 160) ||
-        `Request failed (${res.status})`;
-      throw new Error(String(msg));
-    }
-
-    return (json as T) ?? ({} as T);
-  }
-
-  function safeJson(text: string) {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return null;
-    }
-  }
 
   // ===== Load everything via API routes (single source of truth) =====
   async function load() {
@@ -308,9 +300,10 @@ export default function DashboardPage() {
 
       const m = monthSafe();
 
-      const mr = await apiFetch<MonthRow>(`/api/months?month=${encodeURIComponent(m)}`, {
-        method: "GET",
-      });
+      const mr = await apiFetch<MonthRow>(
+        `/api/months?month=${encodeURIComponent(m)}`,
+        { method: "GET" }
+      );
       setMonthRow(mr || null);
       setCurrencyInput(String(mr?.currency || "GHS").toUpperCase());
       setBudgetInput(formatMoneyInput(String(mr?.budget ?? 0)));
@@ -356,7 +349,6 @@ export default function DashboardPage() {
       const m = monthSafe();
       await apiFetch(`/api/months`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           month: m,
           currency: currencyInput.toUpperCase(),
@@ -390,7 +382,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/expenses`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           month: monthSafe(),
           amount: amt,
@@ -441,7 +432,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/expenses`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: expenseId,
           amount: amt,
@@ -497,7 +487,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/assets`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           month: monthSafe(),
           amount: amt,
@@ -516,30 +505,26 @@ export default function DashboardPage() {
     }
   }
 
-  async function deleteAsset(assetId: number) {
-  if (savingAssetId === assetId) return;
-  setError(null);
-  setSavingAssetId(assetId);
+  async function deleteAsset(assetId: string) {
+    if (savingAssetId === assetId) return;
+    setError(null);
+    setSavingAssetId(assetId);
 
-  try {
-    const user = await requireUser();
-    if (!user) return;
+    try {
+      const user = await requireUser();
+      if (!user) return;
 
-    const { error: delError } = await supabase
-      .from("asset_events")
-      .delete()
-      .eq("id", assetId)
-      .eq("user_id", user.id);
+      await apiFetch(`/api/assets?id=${encodeURIComponent(String(assetId))}`, {
+        method: "DELETE",
+      });
 
-    if (delError) throw delError;
-
-    await load();
-  } catch (e: any) {
-    setError(e?.message || "Failed to delete asset.");
-  } finally {
-    setSavingAssetId(null);
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "Failed to delete asset.");
+    } finally {
+      setSavingAssetId(null);
+    }
   }
-}
 
   // Goal helpers
   function goalProgress(g: SavingGoalRow) {
@@ -672,7 +657,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/goals`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           month: monthSafe(),
           title: name,
@@ -725,7 +709,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/goals`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: goalId,
           title,
@@ -761,7 +744,6 @@ export default function DashboardPage() {
 
       await apiFetch(`/api/goals`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: goalId,
           add_amount: amt,
@@ -952,6 +934,15 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month]);
 
+  useEffect(() => {
+  load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [month]);
+
+useEffect(() => {
+  console.log("ASSET IDS", assets.map(a => ({ id: a.id, type: typeof a.id })));
+}, [assets]);
+
   return (
     <main className="min-h-screen bg-white text-slate-900">
       <div className="mx-auto max-w-5xl px-4 py-8">
@@ -1109,7 +1100,6 @@ export default function DashboardPage() {
                     />
                   </div>
 
-                  {/* NEW: donut/pie chart */}
                   <div className="justify-self-end">
                     <BudgetDonut
                       pct={progressPct}
@@ -1257,7 +1247,9 @@ export default function DashboardPage() {
                     <input
                       id="budget-input"
                       value={budgetInput}
-                      onChange={(e) => setBudgetInput(sanitizeMoneyInput(e.target.value))}
+                      onChange={(e) =>
+                        setBudgetInput(sanitizeMoneyInput(e.target.value))
+                      }
                       onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
                       className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
                       placeholder="0"
@@ -1291,7 +1283,9 @@ export default function DashboardPage() {
                     <input
                       id="exp-amount"
                       value={expAmount}
-                      onChange={(e) => setExpAmount(sanitizeMoneyInput(e.target.value))}
+                      onChange={(e) =>
+                        setExpAmount(sanitizeMoneyInput(e.target.value))
+                      }
                       onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
                       className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
                       placeholder="0"
@@ -1350,7 +1344,9 @@ export default function DashboardPage() {
                     <input
                       id="asset-amount"
                       value={assetAmount}
-                      onChange={(e) => setAssetAmount(sanitizeMoneyInput(e.target.value))}
+                      onChange={(e) =>
+                        setAssetAmount(sanitizeMoneyInput(e.target.value))
+                      }
                       onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
                       className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
                       placeholder="0"
@@ -1495,7 +1491,9 @@ export default function DashboardPage() {
                                   {isEditing ? (
                                     <input
                                       value={editGoalTitle}
-                                      onChange={(e) => setEditGoalTitle(e.target.value)}
+                                      onChange={(e) =>
+                                        setEditGoalTitle(e.target.value)
+                                      }
                                       className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Goal title"
                                       disabled={isGoalBusy}
@@ -1566,11 +1564,21 @@ export default function DashboardPage() {
                               <div className="mt-2">
                                 {isEditing ? (
                                   <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-500">Target</span>
+                                    <span className="text-xs text-slate-500">
+                                      Target
+                                    </span>
                                     <input
                                       value={editGoalTarget}
-                                      onChange={(e) => setEditGoalTarget(sanitizeMoneyInput(e.target.value))}
-                                      onBlur={() => setEditGoalTarget(formatMoneyInput(editGoalTarget))}
+                                      onChange={(e) =>
+                                        setEditGoalTarget(
+                                          sanitizeMoneyInput(e.target.value)
+                                        )
+                                      }
+                                      onBlur={() =>
+                                        setEditGoalTarget(
+                                          formatMoneyInput(editGoalTarget)
+                                        )
+                                      }
                                       className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="0"
                                       inputMode="decimal"
@@ -1610,7 +1618,9 @@ export default function DashboardPage() {
                                   <button
                                     key={amt}
                                     type="button"
-                                    onClick={() => presetGoalAmount(g.id, amt)}
+                                    onClick={() =>
+                                      presetGoalAmount(g.id, amt)
+                                    }
                                     disabled={isGoalBusy}
                                     className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                                   >
@@ -1651,9 +1661,16 @@ export default function DashboardPage() {
                                 id={`goal-add-${g.id}`}
                                 value={goalAddId === g.id ? goalAddAmount : ""}
                                 onFocus={() => setGoalAddId(g.id)}
-                                onChange={(e) => setGoalAddAmount(sanitizeMoneyInput(e.target.value))}
+                                onChange={(e) =>
+                                  setGoalAddAmount(
+                                    sanitizeMoneyInput(e.target.value)
+                                  )
+                                }
                                 onBlur={() => {
-                                  if (goalAddId === g.id) setGoalAddAmount(formatMoneyInput(goalAddAmount));
+                                  if (goalAddId === g.id)
+                                    setGoalAddAmount(
+                                      formatMoneyInput(goalAddAmount)
+                                    );
                                 }}
                                 className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                 placeholder={complete ? "Completed" : "Add custom amount"}
@@ -1687,6 +1704,9 @@ export default function DashboardPage() {
                       const isEditing = editingExpenseId === e.id;
                       const isBusy = savingExpenseId === e.id;
 
+                      const pctOfBudget =
+                        budget > 0 ? clampPct(Math.round((n(e.amount) / budget) * 100)) : 0;
+
                       return (
                         <li
                           key={e.id}
@@ -1700,10 +1720,14 @@ export default function DashboardPage() {
                                     <input
                                       value={editExpAmount}
                                       onChange={(ev) =>
-                                        setEditExpAmount(sanitizeMoneyInput(ev.target.value))
+                                        setEditExpAmount(
+                                          sanitizeMoneyInput(ev.target.value)
+                                        )
                                       }
                                       onBlur={() =>
-                                        setEditExpAmount(formatMoneyInput(editExpAmount))
+                                        setEditExpAmount(
+                                          formatMoneyInput(editExpAmount)
+                                        )
                                       }
                                       className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
                                       placeholder="Amount"
@@ -1751,9 +1775,16 @@ export default function DashboardPage() {
                                 </>
                               ) : (
                                 <>
-                                  <p className="text-sm font-semibold">
-                                    {(e.category || "Other").toUpperCase()}
-                                  </p>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-sm font-semibold">
+                                      {(e.category || "Other").toUpperCase()}
+                                    </p>
+                                    {budget > 0 && (
+                                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-700">
+                                        {pctOfBudget}% of budget
+                                      </span>
+                                    )}
+                                  </div>
                                   <p className="truncate text-xs text-slate-500">
                                     {e.description || "—"}
                                   </p>
@@ -1918,22 +1949,20 @@ function BudgetDonut({ pct, label }: { pct: number; label: string }) {
         className="shrink-0"
         aria-label="Budget usage donut chart"
       >
-        {/* track */}
         <circle
           cx={size / 2}
           cy={size / 2}
           r={r}
           fill="none"
-          stroke="rgb(226 232 240)" // slate-200-ish
+          stroke="rgb(226 232 240)"
           strokeWidth={stroke}
         />
-        {/* progress */}
         <circle
           cx={size / 2}
           cy={size / 2}
           r={r}
           fill="none"
-          stroke="rgb(16 185 129)" // emerald-500-ish
+          stroke="rgb(16 185 129)"
           strokeWidth={stroke}
           strokeLinecap="round"
           strokeDasharray={`${dash} ${c - dash}`}

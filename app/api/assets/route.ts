@@ -89,8 +89,9 @@ export async function DELETE(req: Request) {
     if (error || !user) return jsonError("Unauthorized", 401);
 
     const { searchParams } = new URL(req.url);
-    const id = Number(searchParams.get("id"));
-    if (!Number.isFinite(id) || id <= 0) return jsonError("Invalid id");
+    const id = (searchParams.get("id") || "").trim();
+
+    if (!id) return jsonError("Invalid id");
 
     const { error: delErr } = await sb
       .from("asset_events")
