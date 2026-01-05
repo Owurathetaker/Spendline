@@ -19,61 +19,7 @@ export default function UpdatePasswordPage() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let ignore = false;
-
-    (async () => {
-      setProcessing(true);
-      setError(null);
-
-      try {
-        // ✅ Best path (Supabase v2): reads token/code from URL and sets the session
-        // Some builds may not have this; we guard it.
-        const anyAuth = supabase.auth as any;
-        if (typeof anyAuth.getSessionFromUrl === "function") {
-          const { data, error: urlErr } = await anyAuth.getSessionFromUrl();
-          if (urlErr) {
-            // Not fatal; we’ll fall back to getSession
-          } else if (data?.session) {
-            if (!ignore) setReady(true);
-            // Clean URL so refresh doesn’t keep reprocessing the token
-            if (typeof window !== "undefined") {
-              window.history.replaceState(null, "", window.location.pathname);
-            }
-            if (!ignore) setProcessing(false);
-            return;
-          }
-        }
-
-        // ✅ Fallback: check if session already exists (works for normal logged-in flow)
-        const { data } = await supabase.auth.getSession();
-        if (!ignore) setReady(!!data?.session);
-
-        // Clean URL hash/query if they exist (optional but safer)
-        if (typeof window !== "undefined") {
-          window.history.replaceState(null, "", window.location.pathname);
-        }
-      } catch (e: any) {
-        if (!ignore) {
-          setReady(false);
-          setError(e?.message || "Could not validate recovery session.");
-        }
-      } finally {
-        if (!ignore) setProcessing(false);
-      }
-    })();
-
-    // Keep ready updated if auth state changes while user is on this page
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-      setReady(!!session);
-    });
-
-    return () => {
-      ignore = true;
-      sub?.subscription?.unsubscribe?.();
-    };
-  }, [supabase]);
-
+  
   async function updatePassword() {
     setError(null);
 

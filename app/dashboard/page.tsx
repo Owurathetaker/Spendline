@@ -1873,19 +1873,7 @@ useEffect(() => {
             </div>
 
             {/* Footer */}
-            <div className="mt-10 text-center text-xs text-slate-500">
-              <p>
-                Auth links:{" "}
-                <Link className="underline" href="/login">
-                  Login
-                </Link>{" "}
-                •{" "}
-                <Link className="underline" href="/signup">
-                  Signup
-                </Link>
-              </p>
-              
-            </div>
+            
           </>
         )}
       </div>

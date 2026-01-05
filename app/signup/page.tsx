@@ -35,7 +35,6 @@ export default function SignupPage() {
       return;
     }
  
-    // If email confirmations are ON, user must confirm first.
     setMsg("Account created. Check your email to confirm (if required), then log in.");
     setTimeout(() => router.push("/login"), 1200);
   }
@@ -45,14 +44,19 @@ export default function SignupPage() {
       <h1 style={{ fontSize: 28, fontWeight: 800 }}>Sign up</h1>
       <p style={{ opacity: 0.7, marginTop: 6 }}>Create your Spendline account.</p>
  
-      <form onSubmit={onSubmit} style={{ marginTop: 18, display: "grid", gap: 10 }}>
+      <form
+        onSubmit={onSubmit}
+        style={{ marginTop: 18, display: "grid", gap: 10 }}
+      >
         <input
           placeholder="Full name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           required
           style={{ padding: 12, borderRadius: 10, border: "1px solid #ddd" }}
+          autoComplete="name"
         />
+ 
         <input
           placeholder="Email"
           value={email}
@@ -60,7 +64,9 @@ export default function SignupPage() {
           type="email"
           required
           style={{ padding: 12, borderRadius: 10, border: "1px solid #ddd" }}
+          autoComplete="email"
         />
+ 
         <input
           placeholder="Password (min 6 chars)"
           value={password}
@@ -69,6 +75,7 @@ export default function SignupPage() {
           required
           minLength={6}
           style={{ padding: 12, borderRadius: 10, border: "1px solid #ddd" }}
+          autoComplete="new-password"
         />
  
         <button
@@ -86,7 +93,12 @@ export default function SignupPage() {
         </button>
  
         {msg && (
-          <p style={{ color: msg.startsWith("Account created") ? "green" : "crimson", marginTop: 6 }}>
+          <p
+            style={{
+              color: msg.startsWith("Account created") ? "green" : "crimson",
+              marginTop: 6,
+            }}
+          >
             {msg}
           </p>
         )}
@@ -95,6 +107,17 @@ export default function SignupPage() {
       <p style={{ marginTop: 14, opacity: 0.8 }}>
         Already have an account? <Link href="/login">Log in</Link>
       </p>
+ 
+      {/* Support + Privacy (NOT inside a <p>) */}
+      <div style={{ marginTop: 18, textAlign: "center", fontSize: 12, opacity: 0.7 }}>
+        <Link href="/support" style={{ textDecoration: "underline" }}>
+          Support
+        </Link>
+        {" • "}
+        <Link href="/privacy" style={{ textDecoration: "underline" }}>
+          Privacy
+        </Link>
+      </div>
     </main>
   );
 }
