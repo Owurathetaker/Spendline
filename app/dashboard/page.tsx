@@ -944,8 +944,8 @@ useEffect(() => {
 }, [assets]);
 
   return (
-    <main className="min-h-screen bg-white text-slate-900">
-      <div className="mx-auto max-w-5xl px-4 py-8">
+    <main className="min-h-screen bg-white text-slate-900 flex flex-col">
+  <div className="mx-auto max-w-5xl px-4 py-8 w-full flex-1">
         {/* Header */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -1025,7 +1025,7 @@ useEffect(() => {
               </div>
             </div>
           </div>
-        )}
+                  )}
 
         {!loading && (
           <>
@@ -1884,10 +1884,16 @@ useEffect(() => {
                   Signup
                 </Link>
               </p>
+              
             </div>
           </>
         )}
       </div>
+      <footer className="mt-10 pb-6 text-center text-xs text-slate-500">
+  <a href="/support" className="underline">Support</a>
+  {" • "}
+  <a href="/privacy" className="underline">Privacy</a>
+</footer>
     </main>
   );
 }
