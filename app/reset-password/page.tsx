@@ -22,11 +22,12 @@ export default function ResetPasswordPage() {
 
   setLoading(true);
   try {
-    const redirectTo = `${getSiteUrl()}/update-password`;
+    const redirectTo =
+  typeof window !== "undefined"
+    ? `${window.location.origin}/update-password`
+    : undefined;
 
-    const { error } = await supabase.auth.resetPasswordForEmail(e, {
-      redirectTo,
-    });
+const { error } = await supabase.auth.resetPasswordForEmail(e, { redirectTo });
 
     if (error) throw error;
 

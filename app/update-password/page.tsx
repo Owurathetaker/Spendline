@@ -5,29 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-function readHashParams() {
-  if (typeof window === "undefined") return {};
-  const raw = window.location.hash.startsWith("#")
-    ? window.location.hash.slice(1)
-    : window.location.hash;
-
-  const p = new URLSearchParams(raw);
-  return {
-    access_token: p.get("access_token"),
-    refresh_token: p.get("refresh_token"),
-    type: p.get("type"),
-  };
-}
-
-function readSearchParams() {
-  if (typeof window === "undefined") return {};
-  const p = new URLSearchParams(window.location.search);
-  return {
-    code: p.get("code"),
-    type: p.get("type"),
-  };
-}
-
 export default function UpdatePasswordPage() {
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
@@ -42,89 +19,58 @@ export default function UpdatePasswordPage() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // dev-only debug
-  const [dbg, setDbg] = useState<any>(null);
-
   useEffect(() => {
-    let unsub: (() => void) | null = null;
+    let ignore = false;
 
     (async () => {
       setProcessing(true);
       setError(null);
 
-      const debug: any = {
-        href: typeof window !== "undefined" ? window.location.href : "",
-        hash: typeof window !== "undefined" ? window.location.hash : "",
-        search: typeof window !== "undefined" ? window.location.search : "",
-        saw: {},
-        steps: [],
-      };
-
       try {
-        // 1) Try HASH token recovery flow
-        const h = readHashParams();
-        debug.saw.hash = h;
-
-        if (h.type === "recovery" && h.access_token && h.refresh_token) {
-          debug.steps.push("hash:setSession:start");
-          const { error: setErr } = await supabase.auth.setSession({
-            access_token: h.access_token,
-            refresh_token: h.refresh_token,
-          });
-          if (setErr) {
-            debug.steps.push("hash:setSession:error");
-            throw setErr;
+        // ✅ Best path (Supabase v2): reads token/code from URL and sets the session
+        // Some builds may not have this; we guard it.
+        const anyAuth = supabase.auth as any;
+        if (typeof anyAuth.getSessionFromUrl === "function") {
+          const { data, error: urlErr } = await anyAuth.getSessionFromUrl();
+          if (urlErr) {
+            // Not fatal; we’ll fall back to getSession
+          } else if (data?.session) {
+            if (!ignore) setReady(true);
+            // Clean URL so refresh doesn’t keep reprocessing the token
+            if (typeof window !== "undefined") {
+              window.history.replaceState(null, "", window.location.pathname);
+            }
+            if (!ignore) setProcessing(false);
+            return;
           }
-          debug.steps.push("hash:setSession:ok");
-
-          // clean URL so refresh doesn't re-run weirdly
-          window.history.replaceState(null, "", window.location.pathname);
-        } else {
-          debug.steps.push("hash:notApplicable");
         }
 
-        // 2) Try CODE param flow (PKCE), if present
-        const q = readSearchParams();
-        debug.saw.search = q;
-
-        if (q.code) {
-          debug.steps.push("code:exchange:start");
-          // @ts-ignore - exists in supabase-js v2
-          const { error: exErr } = await supabase.auth.exchangeCodeForSession(q.code);
-          if (exErr) {
-            debug.steps.push("code:exchange:error");
-            throw exErr;
-          }
-          debug.steps.push("code:exchange:ok");
-
-          window.history.replaceState(null, "", window.location.pathname);
-        } else {
-          debug.steps.push("code:notPresent");
-        }
-
-        // 3) Confirm session
-        debug.steps.push("getSession:start");
+        // ✅ Fallback: check if session already exists (works for normal logged-in flow)
         const { data } = await supabase.auth.getSession();
-        debug.session = data?.session ? { exists: true } : { exists: false };
-        setReady(!!data?.session);
+        if (!ignore) setReady(!!data?.session);
 
-        // 4) Live updates
-        const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-          setReady(!!session);
-        });
-        unsub = () => sub.subscription.unsubscribe();
+        // Clean URL hash/query if they exist (optional but safer)
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", window.location.pathname);
+        }
       } catch (e: any) {
-        setReady(false);
-        setError(e?.message || "Could not start password recovery session.");
-        debug.error = e?.message || String(e);
+        if (!ignore) {
+          setReady(false);
+          setError(e?.message || "Could not validate recovery session.");
+        }
       } finally {
-        setDbg(debug);
-        setProcessing(false);
+        if (!ignore) setProcessing(false);
       }
     })();
 
+    // Keep ready updated if auth state changes while user is on this page
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      setReady(!!session);
+    });
+
     return () => {
-      unsub?.();
+      ignore = true;
+      sub?.subscription?.unsubscribe?.();
     };
   }, [supabase]);
 
@@ -160,7 +106,9 @@ export default function UpdatePasswordPage() {
     <main className="min-h-screen bg-white text-slate-900">
       <div className="mx-auto max-w-md px-4 py-10">
         <h1 className="text-2xl font-extrabold tracking-tight">Set new password</h1>
-        <p className="mt-1 text-sm text-slate-500">Choose a new password for your account.</p>
+        <p className="mt-1 text-sm text-slate-500">
+          Choose a new password for your account.
+        </p>
 
         {error && (
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-2">
@@ -217,7 +165,7 @@ export default function UpdatePasswordPage() {
             </button>
           </div>
         )}
-      
+
         <div className="mt-6 text-xs text-slate-500">
           <Link className="underline" href="/login">
             Back to login
