@@ -1727,7 +1727,6 @@ function Card({
     >
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">{title}</p>
       <p className="mt-2 text-2xl font-black tracking-tight text-slate-900">{value}</p>
-      <p className="mt-1 text-[11px] text-slate-600">Tap to jump</p>
     </button>
   );
 }
