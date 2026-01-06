@@ -138,6 +138,7 @@ function isValidYM(ym: string) {
 }
 
 export default function DashboardPage() {
+  const SHOW_MONTH_PICKER = false; // true later when you want it back
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
 
@@ -239,53 +240,50 @@ export default function DashboardPage() {
   }
 
   function safeParseJson(text: string) {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const { data } = await supabase.auth.getSession();
-  const token = data?.session?.access_token;
-
-  if (!token) throw new Error("Unauthorized. Please log in again.");
-
-  const hasBody = init?.body != null;
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    ...(init?.headers as any),
-  };
-
-  // Only set JSON content-type when we actually send a JSON body
-  if (hasBody && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
   }
 
-  const res = await fetch(path, {
-    ...init,
-    headers,
-    // Good practice in production; avoids weird caching surprises
-    cache: "no-store",
-  });
+  async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
 
-  const text = await res.text().catch(() => "");
-  const json = text ? safeParseJson(text) : null;
+    if (!token) throw new Error("Unauthorized. Please log in again.");
 
-  if (!res.ok) {
-    const msg =
-      (json && (json.error || json.message)) ||
-      (text ? text.slice(0, 160) : "") ||
-      `Request failed (${res.status})`;
-    throw new Error(String(msg));
+    const hasBody = init?.body != null;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers as any),
+    };
+
+    if (hasBody && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const res = await fetch(path, {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+
+    const text = await res.text().catch(() => "");
+    const json = text ? safeParseJson(text) : null;
+
+    if (!res.ok) {
+      const msg =
+        (json && (json.error || json.message)) ||
+        (text ? text.slice(0, 160) : "") ||
+        `Request failed (${res.status})`;
+      throw new Error(String(msg));
+    }
+
+    return (json as T) ?? ({} as T);
   }
-
-  // If endpoint returns no body, don't crash
-  return (json as T) ?? ({} as T);
-}
 
   // ===== Load everything via API routes (single source of truth) =====
   async function load() {
@@ -806,24 +804,16 @@ async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
     return [
       { title: "✅ First login", detail: "You’re in. That’s step one." },
       {
-        title:
-          expCount >= 5
-            ? "🏁 Track 5 expenses"
-            : "🏁 Track 5 expenses (locked)",
+        title: expCount >= 5 ? "🏁 Track 5 expenses" : "🏁 Track 5 expenses (locked)",
         detail: `${Math.min(expCount, 5)}/5 logged this month`,
       },
       {
-        title:
-          expCount >= 10
-            ? "🥈 Track 10 expenses"
-            : "🥈 Track 10 expenses (locked)",
+        title: expCount >= 10 ? "🥈 Track 10 expenses" : "🥈 Track 10 expenses (locked)",
         detail: `${Math.min(expCount, 10)}/10 logged this month`,
       },
       {
-        title:
-          assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
-        detail:
-          assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
+        title: assetCount >= 1 ? "💪 Add first asset" : "💪 Add first asset (locked)",
+        detail: assetCount >= 1 ? "Asset tracking started" : "Add any asset to unlock",
       },
       {
         title:
@@ -860,8 +850,7 @@ async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
     const daysLeft =
       cmp === 0 ? Math.max(0, dim - dayOfMonth) : cmp < 0 ? 0 : dim;
 
-    const avgDailySpend =
-      daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
+    const avgDailySpend = daysElapsed > 0 ? Math.round(spentTotal / daysElapsed) : 0;
 
     const projectedSpend =
       daysElapsed > 0 ? Math.round((spentTotal / daysElapsed) * dim) : 0;
@@ -885,10 +874,7 @@ async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   }, [expenses, spentTotal, month]);
 
   function focusById(id: string) {
-    const el = document.getElementById(id) as
-      | HTMLInputElement
-      | HTMLSelectElement
-      | null;
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
     setTimeout(() => el?.focus(), 250);
   }
@@ -934,929 +920,715 @@ async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month]);
 
-  useEffect(() => {
-  load();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [month]);
-
-useEffect(() => {
-  console.log("ASSET IDS", assets.map(a => ({ id: a.id, type: typeof a.id })));
-}, [assets]);
+  if (loading) {
+    return (
+      <main className="min-h-screen bg-white text-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-r-transparent" />
+          <p className="mt-3 text-sm text-slate-600">Loading your dashboard…</p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-white text-slate-900 flex flex-col">
-  <div className="mx-auto max-w-5xl px-4 py-8 w-full flex-1">
+      <div className="mx-auto max-w-5xl px-4 py-8 w-full flex-1">
         {/* Header */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-extrabold tracking-tight">Spendline</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight">Spendline 💰</h1>
             <p className="text-sm text-slate-500">
               Quiet money control — track what leaves, stack what stays.
             </p>
           </div>
+        </div>
 
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <p className="text-xs text-slate-500">Signed in</p>
-              <p className="text-sm font-semibold">{email || "—"}</p>
+        {SHOW_MONTH_PICKER && (
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div>
+              <p className="text-xs text-slate-500">Month</p>
+              <p className="text-sm font-semibold">{monthSafe()}</p>
             </div>
+
+            <input
+              type="month"
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              className="w-full sm:w-auto rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+            />
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-red-700">Heads up</p>
+                <p className="text-xs text-red-700">{error}</p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                className="rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 transition active:scale-[0.98] hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-200"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {nudge && (
+          <div
+            className="fixed bottom-4 right-4 z-50 w-[92vw] max-w-sm"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-amber-900">Quick fix</p>
+                  <p className="mt-0.5 text-xs text-amber-900">{nudge}</p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setNudge(null)}
+                  className="rounded-lg border border-amber-200 bg-white px-2 py-1 text-[11px] font-semibold text-amber-900 transition active:scale-[0.98] hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Overview (tap cards to jump) */}
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Card
+            title="Budget"
+            value={fmtMoney(budget)}
+            variant="blue"
+            onClick={() => focusById("budget-input")}
+          />
+          <Card
+            title="Spent"
+            value={fmtMoney(spentTotal)}
+            variant="red"
+            onClick={() => focusById("exp-amount")}
+          />
+          <Card
+            title="Remaining"
+            value={fmtMoney(remaining)}
+            variant="green"
+            onClick={() => focusById("exp-amount")}
+          />
+          <Card
+            title="Net Worth"
+            value={fmtMoney(netWorth)}
+            variant="purple"
+            onClick={() => focusById("asset-amount")}
+          />
+        </div>
+
+        {/* Progress + Achievements */}
+        <div className="mt-6 grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-bold">Monthly Budget Progress</p>
+              <p className="text-sm text-slate-600">{progressPct}%</p>
+            </div>
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
+              <div className="h-3 w-full rounded-full bg-slate-100">
+                <div
+                  className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+
+              <div className="justify-self-end">
+                <BudgetDonut
+                  pct={progressPct}
+                  label={`${fmtMoney(spentTotal)} / ${fmtMoney(budget)}`}
+                />
+              </div>
+            </div>
+
+            {/* Mini analytics */}
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] text-slate-500">Top category</p>
+                <p className="mt-1 text-sm font-extrabold">
+                  {(analytics.topCategory || "—").toString()}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] text-slate-500">Avg daily spend</p>
+                <p className="mt-1 text-sm font-extrabold">
+                  {fmtMoney(analytics.avgDailySpend)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] text-slate-500">Days left</p>
+                <p className="mt-1 text-sm font-extrabold">{analytics.daysLeft}</p>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-slate-500">
+                Projected spend:{" "}
+                <span className="font-semibold text-slate-700">
+                  {fmtMoney(analytics.projectedSpend)}
+                </span>{" "}
+                <span className="text-slate-400">(simple estimate)</span>
+              </p>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => focusById("exp-amount")}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  + Log expense
+                </button>
+                <button
+                  onClick={() => focusById("asset-amount")}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  + Add asset
+                </button>
+              </div>
+            </div>
+
+            {nextMoves.length > 0 && (
+              <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-bold text-slate-700">Next move</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  {nextMoves.map((m, i) => (
+                    <button
+                      key={i}
+                      onClick={m.action}
+                      className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 transition active:scale-[0.99] hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                    >
+                      <div className="text-sm font-semibold">{m.title}</div>
+                      <div className="mt-1 text-xs text-slate-500">{m.detail}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {nextMove && (
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-bold text-slate-700">Goal next move</p>
+                <p className="mt-1 text-xs text-slate-600">{nextMove.line}</p>
+                {!goalProgress(nextMove.goal).complete && (
+                  <button
+                    onClick={() => jumpToGoalInput(nextMove.goal.id)}
+                    className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                  >
+                    Add to this goal
+                  </button>
+                )}
+              </div>
+            )}
+
+            <p className="mt-3 text-xs text-slate-400">No setup needed — just log and go.</p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <SectionTitle title="Achievements" subtitle="Small wins = momentum." />
+            <ul className="mt-3 space-y-2 text-sm text-slate-700">
+              {achievements.map((a, i) => (
+                <li key={i} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold">{a.title}</div>
+                    <div className="text-xs text-slate-500 truncate">{a.detail}</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div className="mt-6 grid gap-4 lg:grid-cols-3">
+          {/* Month settings */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <SectionTitle title="Month settings" subtitle="Currency + budget for this month." />
+
+            <label className="mt-3 block text-xs text-slate-500">Currency</label>
+            <input
+              value={currencyInput}
+              onChange={(e) => setCurrencyInput(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              placeholder="GHS"
+            />
+
+            <label className="mt-3 block text-xs text-slate-500">Budget</label>
+            <div className="mt-1">
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                  {symbol}
+                </span>
+                <input
+                  id="budget-input"
+                  value={budgetInput}
+                  onChange={(e) => setBudgetInput(sanitizeMoneyInput(e.target.value))}
+                  onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                  placeholder="0"
+                  inputMode="decimal"
+                />
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">Monthly cap (rough is fine).</p>
+            </div>
+
             <button
-              onClick={logout}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              onClick={saveMonthSettings}
+              disabled={savingMonthSettings}
+              className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
             >
-              Log out
+              {savingMonthSettings ? "Saving…" : "Save"}
+            </button>
+          </div>
+
+          {/* Add expense */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <SectionTitle title="Log expense" subtitle="Track money that left today." />
+
+            <label className="mt-3 block text-xs text-slate-500">Amount</label>
+            <div className="mt-1">
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                  {symbol}
+                </span>
+                <input
+                  id="exp-amount"
+                  value={expAmount}
+                  onChange={(e) => setExpAmount(sanitizeMoneyInput(e.target.value))}
+                  onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
+                  placeholder="0"
+                  inputMode="decimal"
+                />
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">Numbers only (e.g. 1500).</p>
+            </div>
+
+            <label className="mt-3 block text-xs text-slate-500">Category</label>
+            <select
+              value={expCategory}
+              onChange={(e) => setExpCategory(e.target.value as any)}
+              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+
+            <label className="mt-3 block text-xs text-slate-500">Description (optional)</label>
+            <input
+              value={expDesc}
+              onChange={(e) => setExpDesc(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              placeholder="e.g. lunch"
+            />
+
+            <button
+              onClick={addExpense}
+              disabled={savingExpenseId === "new"}
+              className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-300"
+            >
+              {savingExpenseId === "new" ? "Adding…" : "Add expense"}
+            </button>
+          </div>
+
+          {/* Add asset */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <SectionTitle title="Stack asset" subtitle="Record money that stayed." />
+
+            <label className="mt-3 block text-xs text-slate-500">Amount</label>
+            <div className="mt-1">
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                  {symbol}
+                </span>
+                <input
+                  id="asset-amount"
+                  value={assetAmount}
+                  onChange={(e) => setAssetAmount(sanitizeMoneyInput(e.target.value))}
+                  onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                  placeholder="0"
+                  inputMode="decimal"
+                />
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">
+                Cash, savings, investments—anything counts.
+              </p>
+            </div>
+
+            <label className="mt-3 block text-xs text-slate-500">Note (optional)</label>
+            <input
+              value={assetNote}
+              onChange={(e) => setAssetNote(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              placeholder="e.g. savings"
+            />
+
+            <button
+              onClick={addAsset}
+              disabled={savingAssetId === "new"}
+              className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            >
+              {savingAssetId === "new" ? "Adding…" : "Add asset"}
             </button>
           </div>
         </div>
 
-        {/* Month picker */}
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-          <div>
-            <p className="text-xs text-slate-500">Month</p>
-            <p className="text-sm font-semibold">{monthSafe()}</p>
-          </div>
+        {/* Goals + lists */}
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          {/* Goals */}
+          <div id="goals-section" className="rounded-2xl border border-slate-200 bg-white p-4">
+            <SectionTitle title="Saving goals" subtitle="Progress is automatic. You just add." />
 
-          <input
-            type="month"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            className="w-full sm:w-auto rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-          />
-        </div>
+            <div className="mt-3 grid gap-2">
+              <input
+                id="goal-name"
+                value={goalName}
+                onChange={(e) => {
+                  setGoalName(e.target.value);
+                  if (goalNameErr) setGoalNameErr(null);
+                }}
+                aria-invalid={!!goalNameErr}
+                aria-describedby={goalNameErr ? "goal-name-err" : undefined}
+                className={`w-full rounded-xl border bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 ${
+                  goalNameErr
+                    ? "border-red-300 focus:ring-red-200"
+                    : "border-slate-200 focus:ring-slate-200"
+                }`}
+                placeholder="Goal name (e.g. Emergency Fund)"
+              />
 
-        {loading && (
-          <div className="mt-6 space-y-4">
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <div className="animate-pulse space-y-3">
-                <div className="h-4 w-40 rounded bg-slate-100" />
-                <div className="h-8 w-full rounded bg-slate-100" />
-                <div className="h-8 w-full rounded bg-slate-100" />
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="rounded-2xl border border-slate-200 bg-white p-4"
-                >
-                  <div className="animate-pulse space-y-3">
-                    <div className="h-3 w-16 rounded bg-slate-100" />
-                    <div className="h-6 w-28 rounded bg-slate-100" />
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="grid gap-4 lg:grid-cols-3">
-              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="animate-pulse space-y-3">
-                  <div className="h-4 w-56 rounded bg-slate-100" />
-                  <div className="h-3 w-full rounded bg-slate-100" />
-                  <div className="h-3 w-3/4 rounded bg-slate-100" />
-                </div>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="animate-pulse space-y-3">
-                  <div className="h-4 w-32 rounded bg-slate-100" />
-                  <div className="h-3 w-full rounded bg-slate-100" />
-                  <div className="h-3 w-2/3 rounded bg-slate-100" />
-                </div>
-              </div>
-            </div>
-          </div>
-                  )}
-
-        {!loading && (
-          <>
-            {error && (
-              <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold text-red-700">Heads up</p>
-                    <p className="text-xs text-red-700">{error}</p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setError(null)}
-                    className="rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 transition active:scale-[0.98] hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-200"
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {nudge && (
-              <div
-                className="fixed bottom-4 right-4 z-50 w-[92vw] max-w-sm"
-                role="status"
-                aria-live="polite"
-                aria-atomic="true"
-              >
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-amber-900">
-                        Quick fix
-                      </p>
-                      <p className="mt-0.5 text-xs text-amber-900">{nudge}</p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setNudge(null)}
-                      className="rounded-lg border border-amber-200 bg-white px-2 py-1 text-[11px] font-semibold text-amber-900 transition active:scale-[0.98] hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                    >
-                      OK
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Overview */}
-            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <Card title="Budget" value={fmtMoney(budget)} />
-              <Card title="Spent" value={fmtMoney(spentTotal)} />
-              <Card title="Remaining" value={fmtMoney(remaining)} />
-              <Card title="Net Worth" value={fmtMoney(netWorth)} />
-            </div>
-
-            {/* Progress + Achievements */}
-            <div className="mt-6 grid gap-4 lg:grid-cols-3">
-              <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-bold">Monthly Budget Progress</p>
-                  <p className="text-sm text-slate-600">{progressPct}%</p>
-                </div>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
-                  <div className="h-3 w-full rounded-full bg-slate-100">
-                    <div
-                      className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-
-                  <div className="justify-self-end">
-                    <BudgetDonut
-                      pct={progressPct}
-                      label={`${fmtMoney(spentTotal)} / ${fmtMoney(budget)}`}
-                    />
-                  </div>
-                </div>
-
-                {/* Mini analytics */}
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <p className="text-[11px] text-slate-500">Top category</p>
-                    <p className="mt-1 text-sm font-extrabold">
-                      {(analytics.topCategory || "—").toString()}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <p className="text-[11px] text-slate-500">Avg daily spend</p>
-                    <p className="mt-1 text-sm font-extrabold">
-                      {fmtMoney(analytics.avgDailySpend)}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <p className="text-[11px] text-slate-500">Days left</p>
-                    <p className="mt-1 text-sm font-extrabold">
-                      {analytics.daysLeft}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-xs text-slate-500">
-                    Projected spend:{" "}
-                    <span className="font-semibold text-slate-700">
-                      {fmtMoney(analytics.projectedSpend)}
-                    </span>{" "}
-                    <span className="text-slate-400">(simple estimate)</span>
-                  </p>
-
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={() => focusById("exp-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                    >
-                      + Log expense
-                    </button>
-                    <button
-                      onClick={() => focusById("asset-amount")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                    >
-                      + Add asset
-                    </button>
-                  </div>
-                </div>
-
-                {nextMoves.length > 0 && (
-                  <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
-                    <p className="text-xs font-bold text-slate-700">Next move</p>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                      {nextMoves.map((m, i) => (
-                        <button
-                          key={i}
-                          onClick={m.action}
-                          className="text-left rounded-xl border border-slate-200 bg-slate-50 p-3 transition active:scale-[0.99] hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                        >
-                          <div className="text-sm font-semibold">{m.title}</div>
-                          <div className="mt-1 text-xs text-slate-500">
-                            {m.detail}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {nextMove && (
-                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <p className="text-xs font-bold text-slate-700">
-                      Goal next move
-                    </p>
-                    <p className="mt-1 text-xs text-slate-600">{nextMove.line}</p>
-                    {!goalProgress(nextMove.goal).complete && (
-                      <button
-                        onClick={() => jumpToGoalInput(nextMove.goal.id)}
-                        className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
-                      >
-                        Add to this goal
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <p className="mt-3 text-xs text-slate-400">
-                  No setup needed — just log and go.
+              {goalNameErr && (
+                <p id="goal-name-err" className="mt-1 text-xs text-red-600" role="alert">
+                  {goalNameErr}
                 </p>
-              </div>
+              )}
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <SectionTitle title="Achievements" subtitle="Small wins = momentum." />
-                <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                  {achievements.map((a, i) => (
-                    <li
-                      key={i}
-                      className="flex items-start justify-between gap-3"
-                    >
-                      <div className="min-w-0">
-                        <div className="font-semibold">{a.title}</div>
-                        <div className="text-xs text-slate-500 truncate">
-                          {a.detail}
-                        </div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-
-            {/* Controls */}
-            <div className="mt-6 grid gap-4 lg:grid-cols-3">
-              {/* Month settings */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle
-                  title="Month settings"
-                  subtitle="Currency + budget for this month."
-                />
-
-                <label className="mt-3 block text-xs text-slate-500">
-                  Currency
-                </label>
-                <input
-                  value={currencyInput}
-                  onChange={(e) => setCurrencyInput(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                  placeholder="GHS"
-                />
-
-                <label className="mt-3 block text-xs text-slate-500">Budget</label>
-                <div className="mt-1">
-                  <div className="relative">
-                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-                      {symbol}
-                    </span>
-                    <input
-                      id="budget-input"
-                      value={budgetInput}
-                      onChange={(e) =>
-                        setBudgetInput(sanitizeMoneyInput(e.target.value))
-                      }
-                      onBlur={() => setBudgetInput(formatMoneyInput(budgetInput))}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Monthly cap (rough is fine).
-                  </p>
-                </div>
-
-                <button
-                  onClick={saveMonthSettings}
-                  disabled={savingMonthSettings}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                >
-                  {savingMonthSettings ? "Saving…" : "Save"}
-                </button>
-              </div>
-
-              {/* Add expense */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle title="Log expense" subtitle="Track money that left today." />
-
-                <label className="mt-3 block text-xs text-slate-500">Amount</label>
-                <div className="mt-1">
-                  <div className="relative">
-                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-                      {symbol}
-                    </span>
-                    <input
-                      id="exp-amount"
-                      value={expAmount}
-                      onChange={(e) =>
-                        setExpAmount(sanitizeMoneyInput(e.target.value))
-                      }
-                      onBlur={() => setExpAmount(formatMoneyInput(expAmount))}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Numbers only (e.g. 1500).
-                  </p>
-                </div>
-
-                <label className="mt-3 block text-xs text-slate-500">
-                  Category
-                </label>
-                <select
-                  value={expCategory}
-                  onChange={(e) => setExpCategory(e.target.value as any)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
-                >
-                  {CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-
-                <label className="mt-3 block text-xs text-slate-500">
-                  Description (optional)
-                </label>
-                <input
-                  value={expDesc}
-                  onChange={(e) => setExpDesc(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                  placeholder="e.g. lunch"
-                />
-
-                <button
-                  onClick={addExpense}
-                  disabled={savingExpenseId === "new"}
-                  className="mt-4 w-full rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-slate-300"
-                >
-                  {savingExpenseId === "new" ? "Adding…" : "Add expense"}
-                </button>
-              </div>
-
-              {/* Add asset */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle title="Stack asset" subtitle="Record money that stayed." />
-
-                <label className="mt-3 block text-xs text-slate-500">Amount</label>
-                <div className="mt-1">
-                  <div className="relative">
-                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-                      {symbol}
-                    </span>
-                    <input
-                      id="asset-amount"
-                      value={assetAmount}
-                      onChange={(e) =>
-                        setAssetAmount(sanitizeMoneyInput(e.target.value))
-                      }
-                      onBlur={() => setAssetAmount(formatMoneyInput(assetAmount))}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                      placeholder="0"
-                      inputMode="decimal"
-                    />
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Cash, savings, investments—anything counts.
-                  </p>
-                </div>
-
-                <label className="mt-3 block text-xs text-slate-500">
-                  Note (optional)
-                </label>
-                <input
-                  value={assetNote}
-                  onChange={(e) => setAssetNote(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                  placeholder="e.g. savings"
-                />
-
-                <button
-                  onClick={addAsset}
-                  disabled={savingAssetId === "new"}
-                  className="mt-4 w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                >
-                  {savingAssetId === "new" ? "Adding…" : "Add asset"}
-                </button>
-              </div>
-            </div>
-
-            {/* Goals + lists */}
-            <div className="mt-6 grid gap-4 lg:grid-cols-2">
-              {/* Goals */}
-              <div
-                id="goals-section"
-                className="rounded-2xl border border-slate-200 bg-white p-4"
-              >
-                <SectionTitle
-                  title="Saving goals"
-                  subtitle="Progress is automatic. You just add."
-                />
-
-                <div className="mt-3 grid gap-2">
+              <div className="mt-1">
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+                    {symbol}
+                  </span>
                   <input
-                    id="goal-name"
-                    value={goalName}
+                    id="goal-target"
+                    value={goalTarget}
                     onChange={(e) => {
-                      setGoalName(e.target.value);
-                      if (goalNameErr) setGoalNameErr(null);
+                      setGoalTarget(sanitizeMoneyInput(e.target.value));
+                      if (goalTargetErr) setGoalTargetErr(null);
                     }}
-                    aria-invalid={!!goalNameErr}
-                    aria-describedby={goalNameErr ? "goal-name-err" : undefined}
-                    className={`w-full rounded-xl border bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 ${
-                      goalNameErr
-                        ? "border-red-300 focus:ring-red-200"
-                        : "border-slate-200 focus:ring-slate-200"
+                    onBlur={() => setGoalTarget(formatMoneyInput(goalTarget))}
+                    className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition ${
+                      goalTargetErr
+                        ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
+                        : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
                     }`}
-                    placeholder="Goal name (e.g. Emergency Fund)"
+                    placeholder="Target amount"
+                    inputMode="decimal"
                   />
-
-                  {goalNameErr && (
-                    <p
-                      id="goal-name-err"
-                      className="mt-1 text-xs text-red-600"
-                      role="alert"
-                    >
-                      {goalNameErr}
-                    </p>
-                  )}
-
-                  <div className="mt-1">
-                    <div className="relative">
-                      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-                        {symbol}
-                      </span>
-                      <input
-                        id="goal-target"
-                        value={goalTarget}
-                        onChange={(e) => {
-                          setGoalTarget(sanitizeMoneyInput(e.target.value));
-                          if (goalTargetErr) setGoalTargetErr(null);
-                        }}
-                        onBlur={() => setGoalTarget(formatMoneyInput(goalTarget))}
-                        className={`w-full rounded-xl border bg-white px-3 py-2 pl-8 text-sm shadow-sm outline-none transition ${
-                          goalTargetErr
-                            ? "border-red-300 focus:border-red-400 focus:ring-2 focus:ring-red-100"
-                            : "border-slate-200 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                        }`}
-                        placeholder="Target amount"
-                        inputMode="decimal"
-                      />
-                    </div>
-                    <p className="mt-1 text-[11px] text-slate-400">
-                      Set the finish line. You can edit later.
-                    </p>
-                  </div>
-
-                  {goalTargetErr && (
-                    <p className="mt-1 text-xs text-red-600">{goalTargetErr}</p>
-                  )}
-
-                  <button
-                    onClick={createGoal}
-                    disabled={savingGoalCreate}
-                    className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                  >
-                    {savingGoalCreate ? "Creating…" : "Create goal"}
-                  </button>
                 </div>
-
-                {goals.length === 0 ? (
-                  <EmptyState text="No goals yet. Create one above to start tracking progress." />
-                ) : (
-                  <ul className="mt-4 space-y-2">
-                    {sortedGoals.map((g) => {
-                      const { target, saved, pct: p, remaining: rem, complete } =
-                        goalProgress(g);
-
-                      const goalBoxClass = complete
-                        ? "rounded-xl border border-emerald-200 bg-emerald-50 p-3 transition hover:shadow-sm"
-                        : "rounded-xl border border-slate-200 p-3 transition hover:bg-slate-50 hover:shadow-sm";
-
-                      const perStep = Math.max(1, Math.round(target * 0.1));
-                      const smart = complete ? 0 : Math.min(rem, perStep);
-
-                      const goalNudge = complete
-                        ? "Completed 🎉"
-                        : rem <= 0
-                        ? "Add any amount"
-                        : `Next: add ${fmtMoney(smart)}`;
-
-                      const isEditing = editingGoalId === g.id;
-                      const isGoalBusy = savingGoalId === g.id;
-
-                      return (
-                        <li key={g.id} className={goalBoxClass}>
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0 w-full">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  {isEditing ? (
-                                    <input
-                                      value={editGoalTitle}
-                                      onChange={(e) =>
-                                        setEditGoalTitle(e.target.value)
-                                      }
-                                      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                      placeholder="Goal title"
-                                      disabled={isGoalBusy}
-                                    />
-                                  ) : (
-                                    <p className="text-sm font-extrabold truncate">
-                                      {g.title}
-                                    </p>
-                                  )}
-
-                                  {complete ? (
-                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
-                                      Completed 🎉
-                                    </span>
-                                  ) : (
-                                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                                      Next move
-                                    </span>
-                                  )}
-                                </div>
-
-                                <div className="flex items-center gap-2">
-                                  {!complete && (
-                                    <>
-                                      {isEditing ? (
-                                        <>
-                                          <button
-                                            onClick={() => saveEditGoal(g.id)}
-                                            disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                            title="Save"
-                                          >
-                                            {isGoalBusy ? "…" : "✅"}
-                                          </button>
-                                          <button
-                                            onClick={cancelEditGoal}
-                                            disabled={isGoalBusy}
-                                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                            title="Cancel"
-                                          >
-                                            ✖️
-                                          </button>
-                                        </>
-                                      ) : (
-                                        <button
-                                          onClick={() => startEditGoal(g)}
-                                          disabled={isGoalBusy}
-                                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                          title="Edit goal"
-                                        >
-                                          ✏️
-                                        </button>
-                                      )}
-                                    </>
-                                  )}
-
-                                  <button
-                                    onClick={() => deleteGoal(g.id)}
-                                    disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                    title="Delete goal"
-                                  >
-                                    {isGoalBusy ? "Deleting…" : "🗑️"}
-                                  </button>
-                                </div>
-                              </div>
-
-                              <div className="mt-2">
-                                {isEditing ? (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-500">
-                                      Target
-                                    </span>
-                                    <input
-                                      value={editGoalTarget}
-                                      onChange={(e) =>
-                                        setEditGoalTarget(
-                                          sanitizeMoneyInput(e.target.value)
-                                        )
-                                      }
-                                      onBlur={() =>
-                                        setEditGoalTarget(
-                                          formatMoneyInput(editGoalTarget)
-                                        )
-                                      }
-                                      className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                      placeholder="0"
-                                      inputMode="decimal"
-                                      disabled={isGoalBusy}
-                                    />
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center justify-between gap-3">
-                                    <p className="text-xs text-slate-600">
-                                      {fmtMoney(saved)} / {fmtMoney(target)}
-                                    </p>
-
-                                    <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-700">
-                                      {p}%
-                                    </span>
-                                  </div>
-                                )}
-
-                                <p className="mt-1 text-[11px] text-slate-600">
-                                  {goalNudge}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
-                            <div
-                              className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
-                              style={{ width: `${p}%` }}
-                            />
-                          </div>
-
-                          <div className="mt-3 flex flex-col gap-2">
-                            {!complete && (
-                              <div className="flex flex-wrap gap-2">
-                                {QUICK_AMOUNTS.map((amt) => (
-                                  <button
-                                    key={amt}
-                                    type="button"
-                                    onClick={() =>
-                                      presetGoalAmount(g.id, amt)
-                                    }
-                                    disabled={isGoalBusy}
-                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                  >
-                                    +{fmtMoney(amt)}
-                                  </button>
-                                ))}
-
-                                {rem > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const smartAmt = Math.min(
-                                        rem,
-                                        Math.max(1, Math.round(target * 0.1))
-                                      );
-                                      presetGoalAmount(g.id, smartAmt);
-                                    }}
-                                    disabled={isGoalBusy}
-                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition active:scale-[0.98] hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                                  >
-                                    Smart add
-                                  </button>
-                                )}
-
-                                <button
-                                  type="button"
-                                  onClick={() => jumpToGoalInput(g.id)}
-                                  disabled={isGoalBusy}
-                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                >
-                                  Focus
-                                </button>
-                              </div>
-                            )}
-
-                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                              <input
-                                id={`goal-add-${g.id}`}
-                                value={goalAddId === g.id ? goalAddAmount : ""}
-                                onFocus={() => setGoalAddId(g.id)}
-                                onChange={(e) =>
-                                  setGoalAddAmount(
-                                    sanitizeMoneyInput(e.target.value)
-                                  )
-                                }
-                                onBlur={() => {
-                                  if (goalAddId === g.id)
-                                    setGoalAddAmount(
-                                      formatMoneyInput(goalAddAmount)
-                                    );
-                                }}
-                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                placeholder={complete ? "Completed" : "Add custom amount"}
-                                inputMode="decimal"
-                                disabled={complete || isGoalBusy}
-                              />
-                              <button
-                                onClick={() => addToGoal(g.id)}
-                                disabled={complete || isGoalBusy}
-                                className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
-                              >
-                                {complete ? "Completed" : isGoalBusy ? "Adding…" : "Add"}
-                              </button>
-                            </div>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                <p className="mt-1 text-[11px] text-slate-400">Set the finish line. You can edit later.</p>
               </div>
 
-              {/* Expenses + assets lists */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <SectionTitle title="Recent expenses" subtitle="Latest 10 entries." />
-                {expenses.length === 0 ? (
-                  <EmptyState text="No expenses yet. Log your first one to start the month." />
-                ) : (
-                  <ul className="mt-3 space-y-2">
-                    {expenses.slice(0, 10).map((e) => {
-                      const isEditing = editingExpenseId === e.id;
-                      const isBusy = savingExpenseId === e.id;
+              {goalTargetErr && <p className="mt-1 text-xs text-red-600">{goalTargetErr}</p>}
 
-                      const pctOfBudget =
-                        budget > 0 ? clampPct(Math.round((n(e.amount) / budget) * 100)) : 0;
+              <button
+                onClick={createGoal}
+                disabled={savingGoalCreate}
+                className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+              >
+                {savingGoalCreate ? "Creating…" : "Create goal"}
+              </button>
+            </div>
 
-                      return (
-                        <li
-                          key={e.id}
-                          className="rounded-xl border border-slate-200 px-3 py-2 transition hover:bg-slate-50"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0 w-full">
+            {goals.length === 0 ? (
+              <EmptyState text="No goals yet. Create one above to start tracking progress." />
+            ) : (
+              <ul className="mt-4 space-y-2">
+                {sortedGoals.map((g) => {
+                  const { target, saved, pct: p, remaining: rem, complete } = goalProgress(g);
+
+                  const goalBoxClass = complete
+                    ? "rounded-xl border border-emerald-200 bg-emerald-50 p-3 transition hover:shadow-sm"
+                    : "rounded-xl border border-slate-200 p-3 transition hover:bg-slate-50 hover:shadow-sm";
+
+                  const isEditing = editingGoalId === g.id;
+                  const isGoalBusy = savingGoalId === g.id;
+
+                  return (
+                    <li key={g.id} className={goalBoxClass}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 w-full">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
                               {isEditing ? (
-                                <>
-                                  <div className="grid grid-cols-2 gap-2">
-                                    <input
-                                      value={editExpAmount}
-                                      onChange={(ev) =>
-                                        setEditExpAmount(
-                                          sanitizeMoneyInput(ev.target.value)
-                                        )
-                                      }
-                                      onBlur={() =>
-                                        setEditExpAmount(
-                                          formatMoneyInput(editExpAmount)
-                                        )
-                                      }
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                      placeholder="Amount"
-                                      inputMode="decimal"
-                                      disabled={isBusy}
-                                    />
-                                    <select
-                                      value={editExpCategory}
-                                      onChange={(ev) =>
-                                        setEditExpCategory(ev.target.value as any)
-                                      }
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                      disabled={isBusy}
-                                    >
-                                      {CATEGORIES.map((c) => (
-                                        <option key={c} value={c}>
-                                          {c}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                  <input
-                                    value={editExpDesc}
-                                    onChange={(ev) => setEditExpDesc(ev.target.value)}
-                                    className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                    placeholder="Description"
-                                    disabled={isBusy}
-                                  />
-                                  <div className="mt-2 flex gap-2">
-                                    <button
-                                      onClick={() => saveEditExpense(e.id)}
-                                      disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                    >
-                                      {isBusy ? "Saving…" : "Save"}
-                                    </button>
-                                    <button
-                                      onClick={cancelEditExpense}
-                                      disabled={isBusy}
-                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </>
+                                <input
+                                  value={editGoalTitle}
+                                  onChange={(e) => setEditGoalTitle(e.target.value)}
+                                  className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-semibold transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  placeholder="Goal title"
+                                  disabled={isGoalBusy}
+                                />
                               ) : (
-                                <>
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-sm font-semibold">
-                                      {(e.category || "Other").toUpperCase()}
-                                    </p>
-                                    {budget > 0 && (
-                                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-700">
-                                        {pctOfBudget}% of budget
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="truncate text-xs text-slate-500">
-                                    {e.description || "—"}
-                                  </p>
-                                  <p className="mt-1 text-[11px] text-slate-400">
-                                    {(e.occurred_at || "").slice(0, 10)}
-                                  </p>
-                                </>
+                                <p className="text-sm font-extrabold truncate">{g.title}</p>
+                              )}
+
+                              {complete ? (
+                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                                  Completed 🎉
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                                  {p}%
+                                </span>
                               )}
                             </div>
 
-                            {!isEditing && (
+                            <div className="flex items-center gap-2">
+                              {!complete && (
+                                <>
+                                  {isEditing ? (
+                                    <>
+                                      <button
+                                        onClick={() => saveEditGoal(g.id)}
+                                        disabled={isGoalBusy}
+                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                        title="Save"
+                                      >
+                                        {isGoalBusy ? "…" : "✅"}
+                                      </button>
+                                      <button
+                                        onClick={cancelEditGoal}
+                                        disabled={isGoalBusy}
+                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                        title="Cancel"
+                                      >
+                                        ✖️
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      onClick={() => startEditGoal(g)}
+                                      disabled={isGoalBusy}
+                                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                      title="Edit goal"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                </>
+                              )}
+
+                              <button
+                                onClick={() => deleteGoal(g.id)}
+                                disabled={isGoalBusy}
+                                className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                title="Delete goal"
+                              >
+                                {isGoalBusy ? "Deleting…" : "🗑️"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="mt-2">
+                            {isEditing ? (
                               <div className="flex items-center gap-2">
-                                <p className="text-sm font-bold">
-                                  {fmtMoney(n(e.amount))}
-                                </p>
-                                <button
-                                  onClick={() => startEditExpense(e)}
-                                  disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                  title="Edit"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={() => deleteExpense(e.id)}
-                                  disabled={isBusy}
-                                  className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
-                                  title="Delete"
-                                >
-                                  {isBusy ? "…" : "🗑️"}
-                                </button>
+                                <span className="text-xs text-slate-500">Target</span>
+                                <input
+                                  value={editGoalTarget}
+                                  onChange={(e) => setEditGoalTarget(sanitizeMoneyInput(e.target.value))}
+                                  onBlur={() => setEditGoalTarget(formatMoneyInput(editGoalTarget))}
+                                  className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  placeholder="0"
+                                  inputMode="decimal"
+                                  disabled={isGoalBusy}
+                                />
                               </div>
+                            ) : (
+                              <p className="text-xs text-slate-600">
+                                {fmtMoney(saved)} / {fmtMoney(target)}{" "}
+                                {complete ? "" : rem > 0 ? `• ${fmtMoney(rem)} left` : ""}
+                              </p>
                             )}
                           </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                        </div>
+                      </div>
 
-                <div className="mt-6">
-                  <SectionTitle title="Recent assets" subtitle="Latest 10 entries." />
-                </div>
+                      <div className="mt-3 h-3 w-full rounded-full bg-slate-100">
+                        <div
+                          className="h-3 rounded-full bg-emerald-500 transition-all duration-500 ease-out"
+                          style={{ width: `${p}%` }}
+                        />
+                      </div>
 
-                {assets.length === 0 ? (
-                  <EmptyState text="No assets yet. Add any asset to start stacking." />
-                ) : (
-                  <ul className="mt-3 space-y-2">
-                    {assets.slice(0, 10).map((a) => {
-                      const isBusy = savingAssetId === a.id;
-
-                      return (
-                        <li
-                          key={a.id}
-                          className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2 transition hover:bg-slate-50"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold">ASSET</p>
-                            <p className="truncate text-xs text-slate-500">
-                              {a.note || "—"}
-                            </p>
-                            <p className="mt-1 text-[11px] text-slate-400">
-                              {(a.created_at || "").slice(0, 10)}
-                            </p>
+                      <div className="mt-3 flex flex-col gap-2">
+                        {!complete && (
+                          <div className="flex flex-wrap gap-2">
+                            {QUICK_AMOUNTS.map((amt) => (
+                              <button
+                                key={amt}
+                                type="button"
+                                onClick={() => presetGoalAmount(g.id, amt)}
+                                disabled={isGoalBusy}
+                                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                              >
+                                +{fmtMoney(amt)}
+                              </button>
+                            ))}
                           </div>
+                        )}
 
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <input
+                            id={`goal-add-${g.id}`}
+                            value={goalAddId === g.id ? goalAddAmount : ""}
+                            onFocus={() => setGoalAddId(g.id)}
+                            onChange={(e) => setGoalAddAmount(sanitizeMoneyInput(e.target.value))}
+                            onBlur={() => {
+                              if (goalAddId === g.id) setGoalAddAmount(formatMoneyInput(goalAddAmount));
+                            }}
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition placeholder:text-slate-400 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                            placeholder={complete ? "Completed" : "Add custom amount"}
+                            inputMode="decimal"
+                            disabled={complete || isGoalBusy}
+                          />
+                          <button
+                            onClick={() => addToGoal(g.id)}
+                            disabled={complete || isGoalBusy}
+                            className="w-full sm:w-auto rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white transition active:scale-[0.98] hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                          >
+                            {complete ? "Completed" : isGoalBusy ? "Adding…" : "Add"}
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
+          {/* Expenses + assets lists */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <SectionTitle title="Recent expenses" subtitle="Latest 10 entries." />
+            {expenses.length === 0 ? (
+              <EmptyState text="No expenses yet. Log your first one to start the month." />
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {expenses.slice(0, 10).map((e) => {
+                  const isEditing = editingExpenseId === e.id;
+                  const isBusy = savingExpenseId === e.id;
+
+                  const pctOfBudget =
+                    budget > 0 ? clampPct(Math.round((n(e.amount) / budget) * 100)) : 0;
+
+                  return (
+                    <li
+                      key={e.id}
+                      className="rounded-xl border border-slate-200 px-3 py-2 transition hover:bg-slate-50"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 w-full">
+                          {isEditing ? (
+                            <>
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  value={editExpAmount}
+                                  onChange={(ev) => setEditExpAmount(sanitizeMoneyInput(ev.target.value))}
+                                  onBlur={() => setEditExpAmount(formatMoneyInput(editExpAmount))}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  placeholder="Amount"
+                                  inputMode="decimal"
+                                  disabled={isBusy}
+                                />
+                                <select
+                                  value={editExpCategory}
+                                  onChange={(ev) => setEditExpCategory(ev.target.value as any)}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                  disabled={isBusy}
+                                >
+                                  {CATEGORIES.map((c) => (
+                                    <option key={c} value={c}>
+                                      {c}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <input
+                                value={editExpDesc}
+                                onChange={(ev) => setEditExpDesc(ev.target.value)}
+                                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm transition placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                placeholder="Description"
+                                disabled={isBusy}
+                              />
+                              <div className="mt-2 flex gap-2">
+                                <button
+                                  onClick={() => saveEditExpense(e.id)}
+                                  disabled={isBusy}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                >
+                                  {isBusy ? "Saving…" : "Save"}
+                                </button>
+                                <button
+                                  onClick={cancelEditExpense}
+                                  disabled={isBusy}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold">
+                                  {(e.category || "Other").toUpperCase()}
+                                </p>
+                                {budget > 0 && (
+                                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-700">
+                                    {pctOfBudget}% of budget
+                                  </span>
+                                )}
+                              </div>
+                              <p className="truncate text-xs text-slate-500">{e.description || "—"}</p>
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                {(e.occurred_at || "").slice(0, 10)}
+                              </p>
+                            </>
+                          )}
+                        </div>
+
+                        {!isEditing && (
                           <div className="flex items-center gap-2">
-                            <p className="text-sm font-bold">
-                              {fmtMoney(n(a.amount))}
-                            </p>
+                            <p className="text-sm font-bold">{fmtMoney(n(e.amount))}</p>
                             <button
-                              onClick={() => deleteAsset(a.id)}
+                              onClick={() => startEditExpense(e)}
+                              disabled={isBusy}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                              title="Edit"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={() => deleteExpense(e.id)}
                               disabled={isBusy}
                               className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
                               title="Delete"
@@ -1864,51 +1636,108 @@ useEffect(() => {
                               {isBusy ? "…" : "🗑️"}
                             </button>
                           </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            <div className="mt-6">
+              <SectionTitle title="Recent assets" subtitle="Latest 10 entries." />
             </div>
 
-            {/* Footer */}
-            
-          </>
-        )}
+            {assets.length === 0 ? (
+              <EmptyState text="No assets yet. Add any asset to start stacking." />
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {assets.slice(0, 10).map((a) => {
+                  const isBusy = savingAssetId === a.id;
+
+                  return (
+                    <li
+                      key={a.id}
+                      className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2 transition hover:bg-slate-50"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold">ASSET</p>
+                        <p className="truncate text-xs text-slate-500">{a.note || "—"}</p>
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          {(a.created_at || "").slice(0, 10)}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-bold">{fmtMoney(n(a.amount))}</p>
+                        <button
+                          onClick={() => deleteAsset(a.id)}
+                          disabled={isBusy}
+                          className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold transition active:scale-[0.98] hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-200"
+                          title="Delete"
+                        >
+                          {isBusy ? "…" : "🗑️"}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
       </div>
+
       <footer className="mt-10 pb-6 text-center text-xs text-slate-500">
-  <a href="/support" className="underline">Support</a>
-  {" • "}
-  <a href="/privacy" className="underline">Privacy</a>
-</footer>
+        <a href="/support" className="underline">
+          Support
+        </a>
+        {" • "}
+        <a href="/privacy" className="underline">
+          Privacy
+        </a>
+      </footer>
     </main>
   );
 }
 
-function Card({ title, value }: { title: string; value: string }) {
+function Card({
+  title,
+  value,
+  variant,
+  onClick,
+}: {
+  title: string;
+  value: string;
+  variant: "blue" | "red" | "green" | "purple";
+  onClick?: () => void;
+}) {
+  const styles = {
+    blue: "border-blue-200 bg-gradient-to-br from-blue-50 to-blue-100",
+    red: "border-red-200 bg-gradient-to-br from-red-50 to-red-100",
+    green: "border-emerald-200 bg-gradient-to-br from-emerald-50 to-emerald-100",
+    purple: "border-purple-200 bg-gradient-to-br from-purple-50 to-purple-100",
+  } as const;
+
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:-translate-y-[1px] hover:shadow-md">
-      <p className="text-xs text-slate-500">{title}</p>
-      <p className="mt-1 text-lg font-extrabold tracking-tight">{value}</p>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left rounded-2xl border p-4 shadow-sm transition active:scale-[0.99] hover:-translate-y-[1px] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-slate-200 ${styles[variant]}`}
+    >
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">{title}</p>
+      <p className="mt-2 text-2xl font-black tracking-tight text-slate-900">{value}</p>
+      <p className="mt-1 text-[11px] text-slate-600">Tap to jump</p>
+    </button>
   );
 }
 
-function SectionTitle({
-  title,
-  subtitle,
-}: {
-  title: string;
-  subtitle?: string;
-}) {
+function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
         <p className="text-sm font-bold text-slate-900">{title}</p>
-        {subtitle ? (
-          <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
-        ) : null}
+        {subtitle ? <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p> : null}
       </div>
     </div>
   );
